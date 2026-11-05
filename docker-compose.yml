@@ -1,0 +1,47 @@
+name: smartlog-analyzer
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-smartlog}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-smartlog-dev}
+      POSTGRES_DB: ${POSTGRES_DB:-smartlog}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks:
+      - smartlog
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-smartlog}:${POSTGRES_PASSWORD:-smartlog-dev}@db:5432/${POSTGRES_DB:-smartlog}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - smartlog
+
+networks:
+  smartlog:
+
+volumes:
+  db-data:

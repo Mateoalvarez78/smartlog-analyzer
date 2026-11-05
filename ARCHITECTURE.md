@@ -149,7 +149,7 @@ erDiagram
 
 - **`GET /api/logs/stats`** no estaba en los endpoints mínimos: expone la consulta de agregación.
 - **Un análisis `FAILED`** responde `200`: la consulta funcionó y el fallo es parte del resultado.
-- **`/api/health`** comprueba la base, pero no llama al LLM: costaría dinero, y si el proveedor cae se pueden seguir ingiriendo logs.
+- **`/api/health`** comprueba la base, pero no llama al LLM: costaría dinero, y si el proveedor cae se pueden seguir ingiriendo logs. Es el único endpoint que no usa RFC 9457: informa un estado, no un error del pedido, así que `200` y `503` comparten el mismo cuerpo.
 
 ## Integración con el LLM
 
@@ -179,7 +179,8 @@ El adaptador devuelve el resultado o un error tipado. Cada análisis guarda prov
 
 - **`docker compose up`** levanta `app` y `db` sin pasos previos. Las variables tienen valores por defecto de desarrollo, así que no hace falta crear un `.env`.
 - **Orden de arranque:** `app` espera a que `db` esté sana, aplica migraciones y carga el seed, que es idempotente.
-- **Red:** `app` publica su puerto al host. `db` queda solo en la red interna, porque los tests usan su propio contenedor.
+- **Red:** `app` publica su puerto al host. `db` queda solo en la red interna, porque los tests usan su propio contenedor. Para desarrollar, `docker-compose.dev.yml` la publica únicamente en `127.0.0.1`.
+- **Imagen:** `node:26-slim` en vez de Alpine. Pesa algo más, pero el compilador de TypeScript 7 no publica binarios específicos para musl, la libc de Alpine, y Debian evita ese riesgo.
 
 Los puertos y las variables se documentan en el `README.md`.
 

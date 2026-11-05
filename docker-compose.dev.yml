@@ -1,0 +1,6 @@
+# Publishes the database on localhost, only to run the app with `npm run dev`.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up db
+services:
+  db:
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
