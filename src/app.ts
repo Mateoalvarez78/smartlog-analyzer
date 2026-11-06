@@ -1,11 +1,18 @@
 import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import type { Pool } from "pg";
+import { MockAnalysisAdapter } from "./analysis/mock-adapter.js";
+import type { AnalysisAdapter } from "./analysis/types.js";
 import type { AppConfig } from "./config.js";
 import { AppError } from "./errors.js";
+import { registerAnalysisRoutes } from "./routes/analysis.js";
 import { registerHealthRoute } from "./routes/health.js";
 import { registerLogsRoutes } from "./routes/logs.js";
 
-export function buildApp(config: AppConfig, pool: Pool): FastifyInstance {
+export function buildApp(
+  config: AppConfig,
+  pool: Pool,
+  adapter: AnalysisAdapter = new MockAnalysisAdapter(),
+): FastifyInstance {
   const app = Fastify({
     logger: { level: config.logLevel },
     // Fastify's AJV default silently strips unknown body/query properties
@@ -39,6 +46,7 @@ export function buildApp(config: AppConfig, pool: Pool): FastifyInstance {
 
   registerHealthRoute(app, pool, config.healthDbTimeoutMs);
   registerLogsRoutes(app, pool, config);
+  registerAnalysisRoutes(app, pool, config, adapter);
 
   return app;
 }

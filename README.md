@@ -5,9 +5,10 @@ adaptador de IA (mock determinista, intercambiable por un proveedor real) para
 generar un resumen, categorías y sugerencias. Las decisiones técnicas y el
 contrato HTTP completo están en [ARCHITECTURE.md](ARCHITECTURE.md).
 
-> **Estado:** en desarrollo (Etapa 1 de 5). Por ahora funcionan el arranque,
-> las migraciones, el seed y `GET /api/health`. Ingesta/listado de logs y
-> análisis llegan en las próximas etapas.
+> **Estado:** en desarrollo (Etapa 3 de 5 completa). Arranque, migraciones,
+> seed, ingesta/listado de logs y análisis (adaptador mock) funcionan y
+> están verificados contra Docker + PostgreSQL real. Quedan pulir tests
+> adicionales, verificación final desde un clon limpio y este README.
 
 ## Requisitos
 
