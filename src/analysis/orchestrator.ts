@@ -19,11 +19,16 @@ export type AnalyzeOutcome =
  * a hard timeout, and persists exactly one terminal row per accepted
  * attempt. See ARCHITECTURE.md §3/§4/§6 for the contract this implements.
  */
+export interface AnalysisLogger {
+  warn(obj: Record<string, unknown>, msg: string): void;
+}
+
 export async function runAnalysis(
   pool: Pool,
   config: AppConfig,
   adapter: AnalysisAdapter,
   filters: AnalyzeFilters,
+  logger?: AnalysisLogger,
 ): Promise<AnalyzeOutcome> {
   // Same filters and order as GET /api/logs (src/logs/repository.ts), just
   // capped one row past the limit so an oversized batch can be detected
@@ -65,10 +70,14 @@ export async function runAnalysis(
       settled = { status: "succeeded", result: raced };
     }
   } catch (error) {
-    settled = {
-      status: "failed",
-      errorCode: error instanceof InvalidAdapterOutputError ? "INVALID_ADAPTER_OUTPUT" : "ADAPTER_ERROR",
-    };
+    const errorCode = error instanceof InvalidAdapterOutputError ? "INVALID_ADAPTER_OUTPUT" : "ADAPTER_ERROR";
+    // The client only ever sees the stable errorCode (never the adapter's
+    // raw message — it could be a real LLM provider's response). Logging it
+    // server-side is what makes "ADAPTER_ERROR" debuggable later instead of
+    // a dead end: without this, a failing real adapter would be completely
+    // silent in the logs.
+    logger?.warn({ err: error, errorCode, adapter: adapter.name }, "analysis adapter did not produce a usable result");
+    settled = { status: "failed", errorCode };
   }
 
   if (settled.status === "succeeded") {

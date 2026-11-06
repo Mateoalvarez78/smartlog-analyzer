@@ -25,12 +25,18 @@ export function registerAnalysisRoutes(app: FastifyInstance, pool: Pool, config:
       assertValidTimestamp(from);
       assertValidTimestamp(to);
 
-      const outcome = await runAnalysis(pool, config, adapter, {
-        from,
-        to,
-        ...(service !== undefined ? { service } : {}),
-        ...(level !== undefined ? { level } : {}),
-      });
+      const outcome = await runAnalysis(
+        pool,
+        config,
+        adapter,
+        {
+          from,
+          to,
+          ...(service !== undefined ? { service } : {}),
+          ...(level !== undefined ? { level } : {}),
+        },
+        request.log,
+      );
 
       if (outcome.outcome === "rejected") {
         throw unprocessable(outcome.code, outcome.message);

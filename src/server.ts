@@ -6,7 +6,15 @@ const config = loadConfig();
 const pool = createPool(config);
 const app = buildApp(config, pool);
 
+let shuttingDown = false;
+
 async function shutdown(signal: string): Promise<void> {
+  // A second SIGTERM/SIGINT (some orchestrators send it twice, or a
+  // user double-taps Ctrl+C) must not call app.close()/pool.end() a
+  // second time while the first call is still in flight.
+  if (shuttingDown) return;
+  shuttingDown = true;
+
   app.log.info({ signal }, "shutting down");
   await app.close();
   await pool.end();

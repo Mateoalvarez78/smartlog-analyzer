@@ -169,6 +169,33 @@ describe("GET /api/logs", () => {
     expect(response.statusCode).toBe(400);
   });
 
+  it("applies logsDefaultLimit when limit is omitted, and truncates to the newest rows", async () => {
+    // The 4 beforeEach fixtures aren't enough to prove truncation; a
+    // dedicated low-default app on the same data makes the default limit
+    // and the DESC order it truncates against both observable.
+    const lowLimitApp = buildApp({ ...config, logsDefaultLimit: 2 }, pool);
+    await lowLimitApp.ready();
+    try {
+      const response = await lowLimitApp.inject({ method: "GET", url: "/api/logs" });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body).toHaveLength(2);
+      // Fixtures "d" (2026-11-02) and "c" (2026-11-01T10:00) are the two
+      // most recent of the four — truncation must keep those, not drop them.
+      expect(body.map((log: { message: string }) => log.message)).toEqual(["d", "c"]);
+    } finally {
+      await lowLimitApp.close();
+    }
+  });
+
+  it("respects an explicit limit smaller than the matching row count", async () => {
+    const response = await app.inject({ method: "GET", url: "/api/logs?limit=1" });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body).toHaveLength(1);
+    expect(body[0]).toMatchObject({ message: "d" });
+  });
+
   it("rejects malformed filter timestamps", async () => {
     const response = await app.inject({ method: "GET", url: "/api/logs?from=not-a-date" });
     expect(response.statusCode).toBe(400);
