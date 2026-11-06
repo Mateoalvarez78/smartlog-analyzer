@@ -34,6 +34,18 @@ export function buildApp(
       });
     }
 
+    // Fastify's own request-parsing/routing errors (malformed JSON, an empty
+    // body, a body over the size limit, an unsupported content-type, ...)
+    // carry a genuine client-error statusCode and a stable code. Without
+    // this, every one of them fell through to the generic 500 branch below
+    // — confirmed live: a >1MB POST body logged FST_ERR_CTP_BODY_TOO_LARGE
+    // (statusCode 413) but the client received 500.
+    if (typeof error.statusCode === "number" && error.statusCode >= 400 && error.statusCode < 500) {
+      return reply.code(error.statusCode).send({
+        error: { code: error.code ?? "BAD_REQUEST", message: error.message },
+      });
+    }
+
     app.log.error(error);
     return reply.code(500).send({
       error: { code: "INTERNAL_ERROR", message: "Unexpected server error." },
