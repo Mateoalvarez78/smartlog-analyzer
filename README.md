@@ -5,11 +5,12 @@ adaptador de IA (mock determinista, intercambiable por un proveedor real) para
 generar un resumen, categorías y sugerencias. Las decisiones técnicas y el
 contrato HTTP completo están en [ARCHITECTURE.md](ARCHITECTURE.md).
 
-> **Estado:** funcional end-to-end (Etapa 4 de 5). Arranque, migraciones,
-> seed, ingesta/listado de logs y análisis (adaptador mock) están
-> implementados y verificados contra Docker + PostgreSQL real, incluida una
-> corrida completa desde un clon limpio (ver [Verificación](#verificación)).
-> Falta la Etapa 5 (empaquetado para entrega).
+> **Estado:** funcional end-to-end y auditado (Etapa 5 de 5). Arranque,
+> migraciones, seed, ingesta/listado de logs y análisis (adaptador mock)
+> están implementados, verificados contra Docker + PostgreSQL real dos veces
+> desde un clon limpio, y pasaron una auditoría completa de código y
+> seguridad que corrigió 5 problemas reales (ver
+> [Verificación](#verificación) y [Uso de IA](#uso-de-ia-durante-el-desarrollo)).
 
 ## Requisitos
 
@@ -74,6 +75,17 @@ Para detenerlo y borrar también los datos:
 ```bash
 docker compose down -v
 ```
+
+> **Nota (Windows + Docker Desktop):** en esta máquina, con WSL2 instalado
+> el mismo día, `curl`/`fetch` desde el host a `localhost:3000` a veces se
+> queda colgado sin respuesta aunque el contenedor esté sano — es
+> intermitencia conocida del proxy de puertos de Docker Desktop en Windows,
+> no de la app. Se confirmó con tres herramientas de cliente distintas
+> (`curl`, `Invoke-WebRequest`, `fetch` de Node) y comparando contra:
+> `docker compose exec app node -e "fetch('http://127.0.0.1:3000/...')"`
+> (siempre responde) y `docker compose ps` (el healthcheck de `app` lo marca
+> `(healthy)` de forma constante). Si te pasa, probá `127.0.0.1` en vez de
+> `localhost`, o reiniciá Docker Desktop.
 
 ## Cómo correr los tests
 
@@ -181,13 +193,34 @@ Tests y typecheck, también desde ese mismo clon limpio:
 ```bash
 npm ci
 npm run typecheck   # sin errores
-npm test            # 66/66 passing
+npm test            # 71/71 passing
 ```
 
 Esto cubre explícitamente lo que pide el enunciado antes de entregar:
 `docker compose up` sin pasos adicionales, los tests corriendo con el
 comando documentado, y ningún estado previo del entorno de desarrollo
 "ensuciando" el resultado.
+
+### Auditoría posterior (5 hallazgos reales, corregidos y re-verificados)
+
+Después de la Etapa 4 se hizo una pasada de auditoría completa: relectura
+crítica de cada archivo, pruebas en vivo de casos límite contra el
+contenedor real (JSON malformado, body vacío, payload de 2 MB, inyección
+SQL) y revisión de la imagen Docker. Apareció esto, todo corregido y
+re-verificado con un segundo clon limpio completo:
+
+| # | Hallazgo | Evidencia | Fix |
+|---|---|---|---|
+| 1 | Un error propio de Fastify (JSON malformado, body vacío, `413` por payload grande) devolvía `500` en vez de su código real | `docker compose logs` mostró `FST_ERR_CTP_BODY_TOO_LARGE` (`statusCode: 413`) pero el cliente recibía `500` | El error handler ahora respeta `error.statusCode` cuando es un 4xx genuino de Fastify, no solo `AppError`/`.validation` |
+| 2 | El contenedor corría como `root` | `docker compose exec app whoami` → `root` | `USER node` (usuario no-root que ya trae la imagen oficial) |
+| 3 | Si el adaptador fallaba, el error real nunca se logueaba — solo quedaba el código genérico en la base | Lectura de `orchestrator.ts`: el `catch` no logueaba nada | Se loguea server-side (`request.log.warn`) sin exponerlo nunca al cliente |
+| 4 | Un segundo `SIGTERM`/`SIGINT` durante el shutdown podía cerrar el pool dos veces en paralelo | Lectura de `server.ts` | Flag de guarda para que el segundo signal sea un no-op |
+| 5 | `limit` (truncado de resultados y default) no tenía ningún test, pese a ser un comportamiento documentado | `grep` sobre los tests confirmó que no se verificaba | 2 tests nuevos que prueban truncado y que se mantienen las filas más recientes |
+
+Se intentó además inyección SQL vía query params (`service`) y en el body:
+el valor viajó parametrizado y la tabla quedó intacta, como se espera de
+usar `pg` con placeholders en todo el código (nunca interpolación de
+strings de usuario en SQL).
 
 ## Uso de IA durante el desarrollo
 
@@ -229,9 +262,20 @@ lista completa de cada prompt.
   --hard` por destructivo) — resultado: el historial real de ambos intentos
   de diseño queda visible en vez de reescrito.
 
+- Una auditoría completa posterior a la Etapa 4 (relectura de cada archivo +
+  pruebas en vivo contra el contenedor: JSON malformado, payloads grandes,
+  intento de inyección SQL) encontró 5 problemas reales más —el más
+  importante, que cualquier error propio de Fastify que no fuera de
+  validación de schema devolvía `500` en vez de su código HTTP real (ver
+  tabla en [Verificación](#verificación))—, todos corregidos y
+  re-verificados con un segundo clon limpio completo. Detalle en el
+  historial de commits (`fix: surface Fastify's own request errors...` y
+  `fix: audit hardening...`).
+
 **Lección general:** el *typecheck* y la compilación nunca reemplazan correr
-contra la base de datos y el contenedor reales — los tres bugs de arriba
-pasaron el *typecheck* sin problema y solo aparecieron al ejecutar.
+contra la base de datos y el contenedor reales — ninguno de los 8 bugs
+reales encontrados en todo el proceso (3 en Etapa 1-2, 5 en la auditoría)
+rompía el *typecheck*; todos aparecieron solo al ejecutar.
 
 ## Qué dejaste afuera (y cómo lo resolvería)
 
@@ -242,4 +286,5 @@ pasaron el *typecheck* sin problema y solo aparecieron al ejecutar.
 | Paginación por cursor en `GET /api/logs` | El enunciado pide "filtros", no paginación; `limit` acotado alcanza para el prototipo | Cursor por `(timestamp, id)` en vez de `OFFSET`, para no degradar con volumen |
 | CI (GitHub Actions) | Extra opcional del enunciado, condicionado a que lo obligatorio ya funcione | Un workflow que corra `npm run typecheck`, levante Postgres como servicio y corra `npm test` en cada push |
 | Retención/borrado de logs analizados | Fuera del alcance del prototipo | Revisar la integridad referencial de `analyses.log_ids` (hoy es un array sin FK) antes de permitir borrar logs ya analizados |
+| Lock para migraciones concurrentes | `docker compose up` corre un solo replica de `app`; con 2+ arrancando a la vez contra una base vacía, ambos podrían intentar aplicar la misma migración a la vez | `pg_advisory_lock` alrededor de `runMigrations`, detectado en la auditoría de código, no en ejecución |
 | UI | El enunciado pide una API, no una interfaz | No aplica para este desafío |
