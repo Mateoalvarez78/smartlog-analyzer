@@ -1,0 +1,34 @@
+{
+  "name": "smartlog-analyzer",
+  "version": "0.1.0",
+  "description": "Ingest microservice logs, store them and detect patterns with an LLM.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=.env src/server.ts",
+    "build": "tsc --project tsconfig.build.json",
+    "start": "node dist/src/server.js",
+    "typecheck": "tsc --noEmit",
+    "migrate": "tsx src/db/migrate.ts",
+    "migrate:dist": "node dist/src/db/migrate.js",
+    "seed": "tsx db/seed.ts",
+    "seed:dist": "node dist/db/seed.js",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration"
+  },
+  "dependencies": {
+    "fastify": "^5.12.8",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}

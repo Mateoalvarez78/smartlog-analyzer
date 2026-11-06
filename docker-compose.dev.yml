@@ -1,0 +1,7 @@
+# Overlay for local development: only publishes the database port to the
+# host loopback so `npm run dev` (running on the host, not in a container)
+# can reach it. Usage documented in README "Desarrollo local".
+services:
+  db:
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"

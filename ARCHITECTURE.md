@@ -179,6 +179,7 @@ interface AnalysisAdapter {
 | Vitest | Jest | Arranque más rápido con TS nativo (sin `ts-jest`/Babel), API compatible con Jest (baja fricción), y mejor soporte ESM — relevante porque el proyecto usa TypeScript con `"module": "NodeNext"`. |
 | Sin paginación por cursor en `GET /api/logs` (solo `limit`) | Cursor/keyset pagination | Listado en el enunciado es "con filtros", no pagineado explícitamente. `limit` acotado + orden estable es suficiente para el prototipo; cursor queda documentado como extra no implementado. |
 | Errores propios `{error:{code,message}}` | RFC 9457 (`application/problem+json`) | Un formato propio chico es más rápido de implementar y de testear exhaustivamente en el tiempo disponible; RFC 9457 es más estándar pero agrega campos (`type`, `title`, `instance`) que no aportan en un prototipo de 5 endpoints. Se documenta como mejora natural si la API crece. |
+| Runner de migraciones propio (~40 líneas, tabla `schema_migrations`, aplica `db/migrations/*.sql` en orden dentro de una transacción) | `node-pg-migrate` u otra librería | Solo se necesita aplicar SQL versionado en orden y no duplicar en reinicios; una librería completa (rollback, generación de migraciones, CLI) es más superficie de la que el alcance justifica. Se reconsidera si el esquema empieza a necesitar rollbacks reales. |
 | Sin CI | GitHub Actions | El enunciado marca CI como extra opcional condicionado a que "lo obligatorio ya funcione". Se agrega solo si sobra tiempo tras Etapa 4. |
 
 ## 6. Fallos, reintentos y qué pasa si el proceso cae

@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-smartlog}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-smartlog-dev}
+      POSTGRES_DB: ${POSTGRES_DB:-smartlog}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-smartlog} -d ${POSTGRES_DB:-smartlog}"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    networks:
+      - smartlog
+
+  app:
+    build: .
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-smartlog}:${POSTGRES_PASSWORD:-smartlog-dev}@db:5432/${POSTGRES_DB:-smartlog}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      HEALTH_DB_TIMEOUT_MS: ${HEALTH_DB_TIMEOUT_MS:-1000}
+      ANALYSIS_TIMEOUT_MS: ${ANALYSIS_TIMEOUT_MS:-5000}
+      ANALYSIS_MAX_LOGS: ${ANALYSIS_MAX_LOGS:-100}
+      ANALYSIS_MAX_BYTES: ${ANALYSIS_MAX_BYTES:-200000}
+      LOGS_DEFAULT_LIMIT: ${LOGS_DEFAULT_LIMIT:-50}
+      LOGS_MAX_LIMIT: ${LOGS_MAX_LIMIT:-500}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - smartlog
+
+networks:
+  smartlog:
+
+volumes:
+  db-data:
