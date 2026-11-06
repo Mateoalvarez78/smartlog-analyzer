@@ -4,6 +4,14 @@ Prototipo interno para ingestar logs de varios microservicios, consultarlos y ge
 análisis (resumen, categorías, sugerencias) a partir de un lote acotado, usando un
 adaptador de IA intercambiable.
 
+> **Nota sobre el historial:** el primer commit de este repo exploró un diseño
+> asincrónico (cola con `SKIP LOCKED`, `202` + polling, errores RFC 9457). Se
+> descartó por priorizar un flujo más simple y verificable dentro del tiempo
+> disponible: análisis síncrono con timeout acotado, persistencia terminal única y
+> errores en un formato propio más chico. Esa exploración queda disponible en la
+> rama `stage-1-walking-skeleton` como referencia, sin mergear a `main`. Esta
+> versión del documento es la fuente de verdad vigente.
+
 ## 1. Componentes y flujo de datos
 
 ```mermaid
@@ -164,12 +172,13 @@ interface AnalysisAdapter {
 | Node.js 24 LTS + TypeScript + Fastify 5 | Java + Spring Boot | Mayor velocidad de desarrollo en el tiempo disponible (10–15 h); Fastify da validación por esquema y bajo overhead sin boilerplate de Spring. |
 | PostgreSQL 17 + `pg` con SQL parametrizado | Prisma/TypeORM, o SQLite | SQL explícito hace auditable cada query (relevante para la defensa técnica); evita la "caja negra" de un ORM. SQLite se descartó porque el enunciado pide un modelo relacional con agregación, y Postgres es el estándar de facto para microservicios reales. |
 | Monolito modular (un proceso, módulos `logs`/`analysis` separados) | Microservicios separados (logs-service, analysis-service) | El alcance (un prototipo, 5 endpoints) no justifica la complejidad operativa de red/descubrimiento entre servicios. Separación lógica por módulo ya da el aislamiento necesario para testear y defender cada pieza. |
-| Análisis síncrono con timeout acotado | Cola (BullMQ/SQS) + worker asíncrono | Un flujo de cola es más robusto para proveedores lentos reales, pero agrega infraestructura (broker, estado `pending`, polling) que no es defendible en el tiempo disponible. Documentado como evolución natural si el proveedor real introduce latencia alta. |
+| Análisis síncrono con timeout acotado | Cola (BullMQ/SQS) + worker asíncrono con `202`/polling | Un flujo de cola es más robusto para proveedores lentos reales, pero agrega infraestructura (estado `pending`, locking, polling) que no es defendible en el tiempo disponible. Se exploró en el primer commit del repo y se descartó por esa razón (ver nota al inicio de este documento). Documentado como evolución natural si el proveedor real introduce latencia alta. |
 | Adaptador mock determinista detrás de interfaz `AnalysisAdapter` | Proveedor real (OpenAI/Anthropic) en el flujo principal | El enunciado lo permite explícitamente. Mock determinista permite que el evaluador reproduzca la demo sin red ni API key, y las pruebas de timeout/formato inesperado son deterministas en CI. La interfaz deja el cambio a un proveedor real como una sola pieza intercambiable. |
 | `analyses.result` como `JSONB` + `log_ids uuid[]` | Tablas normalizadas por categoría/sugerencia, tabla intermedia `analysis_logs` | El resultado se consulta siempre completo por ID (no hay queries relacionales sobre categorías individuales en el alcance actual). Un array acotado a ≤100 IDs es más simple que una tabla intermedia y no genera N+1. Si se agrega retención/borrado de logs analizados, esta decisión se revisa (el array no tiene integridad referencial). |
 | Timeout propio con `setTimeout` + `Promise.race`, limpieza garantizada | Confiar únicamente en `AbortSignal` | El enunciado exige que el timeout resuelva aun si el adaptador ignora la señal de aborto. Se usa `Promise.race` entre la promesa del adaptador y un temporizador; se propaga `AbortSignal` igual (buenas prácticas / proveedores reales sí lo respetan), pero el temporizador es la garantía dura. El temporizador se limpia en ambos casos para no dejar handles colgados. |
 | Vitest | Jest | Arranque más rápido con TS nativo (sin `ts-jest`/Babel), API compatible con Jest (baja fricción), y mejor soporte ESM — relevante porque el proyecto usa TypeScript con `"module": "NodeNext"`. |
 | Sin paginación por cursor en `GET /api/logs` (solo `limit`) | Cursor/keyset pagination | Listado en el enunciado es "con filtros", no pagineado explícitamente. `limit` acotado + orden estable es suficiente para el prototipo; cursor queda documentado como extra no implementado. |
+| Errores propios `{error:{code,message}}` | RFC 9457 (`application/problem+json`) | Un formato propio chico es más rápido de implementar y de testear exhaustivamente en el tiempo disponible; RFC 9457 es más estándar pero agrega campos (`type`, `title`, `instance`) que no aportan en un prototipo de 5 endpoints. Se documenta como mejora natural si la API crece. |
 | Sin CI | GitHub Actions | El enunciado marca CI como extra opcional condicionado a que "lo obligatorio ya funcione". Se agrega solo si sobra tiempo tras Etapa 4. |
 
 ## 6. Fallos, reintentos y qué pasa si el proceso cae
