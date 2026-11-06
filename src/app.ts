@@ -6,7 +6,15 @@ import { registerHealthRoute } from "./routes/health.js";
 import { registerLogsRoutes } from "./routes/logs.js";
 
 export function buildApp(config: AppConfig, pool: Pool): FastifyInstance {
-  const app = Fastify({ logger: { level: config.logLevel } });
+  const app = Fastify({
+    logger: { level: config.logLevel },
+    // Fastify's AJV default silently strips unknown body/query properties
+    // instead of failing `additionalProperties: false`. Disabling that
+    // makes an unexpected field a real 400 instead of a silently-dropped
+    // typo (e.g. a client sending "sevice" would otherwise lose data
+    // without any indication).
+    ajv: { customOptions: { removeAdditional: false } },
+  });
 
   app.setErrorHandler((error: FastifyError, _request, reply) => {
     if (error instanceof AppError) {

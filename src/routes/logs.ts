@@ -1,10 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import type { AppConfig } from "../config.js";
-import { badRequest } from "../errors.js";
 import { insertLog, listLogs } from "../logs/repository.js";
 import { getLogsQuerySchema, postLogBodySchema } from "../logs/schema.js";
 import type { ListLogsFilters, LogLevel, NewLog } from "../logs/types.js";
+import { assertValidTimestamp } from "../time.js";
 
 interface PostLogBody {
   service: string;
@@ -19,12 +19,6 @@ interface GetLogsQuery {
   from?: string;
   to?: string;
   limit?: number;
-}
-
-function assertValidTimestamp(value: string): void {
-  if (Number.isNaN(Date.parse(value))) {
-    throw badRequest("INVALID_TIMESTAMP", `"${value}" is not a valid calendar date/time.`);
-  }
 }
 
 export function registerLogsRoutes(app: FastifyInstance, pool: Pool, config: AppConfig): void {

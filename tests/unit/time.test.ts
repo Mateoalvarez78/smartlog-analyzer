@@ -1,0 +1,38 @@
+import { describe, expect, it } from "vitest";
+import { assertValidTimestamp } from "../../src/time.js";
+
+describe("assertValidTimestamp", () => {
+  it("accepts a valid UTC timestamp", () => {
+    expect(() => assertValidTimestamp("2026-11-01T08:00:00Z")).not.toThrow();
+  });
+
+  it("accepts a valid timestamp with a non-UTC offset, even when it rolls to a different UTC day", () => {
+    // 23:30 on the 1st at -03:00 is 02:30 UTC on the 2nd: a real time, not an invalid one.
+    expect(() => assertValidTimestamp("2026-11-01T23:30:00-03:00")).not.toThrow();
+  });
+
+  it("accepts a timestamp with milliseconds", () => {
+    expect(() => assertValidTimestamp("2026-11-01T08:00:00.123Z")).not.toThrow();
+  });
+
+  it("rejects a non-existent calendar day (February 30th)", () => {
+    expect(() => assertValidTimestamp("2026-02-30T10:00:00Z")).toThrow(/not a real calendar date/);
+  });
+
+  it("rejects an out-of-range hour", () => {
+    expect(() => assertValidTimestamp("2026-11-01T24:00:00Z")).toThrow(/not a real calendar date/);
+  });
+
+  it("rejects a string with no offset", () => {
+    expect(() => assertValidTimestamp("2026-11-01T08:00:00")).toThrow(/explicit offset/);
+  });
+
+  it("rejects a non-date string", () => {
+    expect(() => assertValidTimestamp("not-a-date")).toThrow(/explicit offset/);
+  });
+
+  it("correctly rejects February 29th on a non-leap year but accepts it on a leap year", () => {
+    expect(() => assertValidTimestamp("2026-02-29T00:00:00Z")).toThrow(/not a real calendar date/);
+    expect(() => assertValidTimestamp("2028-02-29T00:00:00Z")).not.toThrow();
+  });
+});
