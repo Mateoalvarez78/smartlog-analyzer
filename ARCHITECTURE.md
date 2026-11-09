@@ -2,58 +2,61 @@
 
 Prototipo interno para ingestar logs de varios microservicios, consultarlos y generar
 análisis (resumen, categorías, sugerencias) a partir de un lote acotado, usando un
-adaptador de IA intercambiable.
+LLM detrás de una interfaz intercambiable (mock por defecto, proveedor real opcional).
 
-> **Nota sobre el historial:** el primer commit de este repo exploró un diseño
+> **Nota sobre el historial:** el primer commit del repo exploró un diseño
 > asincrónico (cola con `SKIP LOCKED`, `202` + polling, errores RFC 9457). Se
-> descartó por priorizar un flujo más simple y verificable dentro del tiempo
-> disponible: análisis síncrono con timeout acotado, persistencia terminal única y
-> errores en un formato propio más chico. Esa exploración queda disponible en la
-> rama `stage-1-walking-skeleton` como referencia, sin mergear a `main`. Esta
-> versión del documento es la fuente de verdad vigente.
+> descartó a favor de un análisis síncrono con timeout acotado (ver §5). Esa
+> exploración queda en la rama `stage-1-walking-skeleton`, sin mergear.
 
 ## 1. Componentes y flujo de datos
 
 ```mermaid
 flowchart LR
-    Client["Cliente HTTP<br/>(curl / Postman / PIA)"]
+    Client["Cliente HTTP<br/>(curl / Postman)"]
 
     subgraph API["Fastify API (Node.js + TypeScript)"]
         direction TB
         Routes["Routes<br/>src/routes/*"]
-        Logs["Logs service<br/>src/modules/logs"]
-        Analysis["Analysis orchestrator<br/>src/modules/analysis"]
-        Adapter["AnalysisAdapter interface<br/>src/modules/analysis/adapter"]
-        Mock["MockAnalysisAdapter<br/>(determinista, sin red)"]
+        Logs["Logs repository<br/>src/logs"]
+        Orchestrator["Analysis orchestrator<br/>src/analysis/orchestrator.ts"]
+        Validator["Validación de salida<br/>src/analysis/validate-output.ts"]
+        LlmAdapter["LlmAnalysisAdapter<br/>prompt + parseo de texto<br/>src/analysis/llm"]
+        Mock["MockLlmClient<br/>(heurísticas, sin red)"]
+        Real["OpenAiCompatibleClient<br/>(HTTP)"]
     end
 
     DB[("PostgreSQL<br/>logs / analyses")]
+    Provider["Proveedor LLM<br/>Ollama / Gemini / OpenAI"]
 
-    Client -- "POST/GET /api/logs" --> Routes
-    Client -- "POST /api/logs/analyze" --> Routes
-    Client -- "GET /api/analysis/:id" --> Routes
+    Client -- "POST/GET /api/logs<br/>GET /api/logs/stats" --> Routes
+    Client -- "POST /api/logs/analyze<br/>GET /api/analysis/:id" --> Routes
     Client -- "GET /api/health" --> Routes
 
     Routes --> Logs
-    Routes --> Analysis
+    Routes --> Orchestrator
     Logs -- "SQL parametrizado" --> DB
-    Analysis -- "SELECT lote acotado" --> DB
-    Analysis -- "invoca con timeout" --> Adapter
-    Adapter -.->|implementación activa| Mock
-    Analysis -- "INSERT terminal<br/>(succeeded/failed)" --> DB
-
-    Adapter -. "futuro: HTTP a proveedor real<br/>(OpenAI/Anthropic/Gemini)" .-> Provider["LLM Provider<br/>(no implementado)"]
+    Orchestrator -- "SELECT lote acotado" --> Logs
+    Orchestrator -- "invoca con timeout" --> LlmAdapter
+    LlmAdapter -- "ANALYSIS_ADAPTER=mock" --> Mock
+    LlmAdapter -- "ANALYSIS_ADAPTER=openai-compatible" --> Real
+    Real -- "POST /chat/completions" --> Provider
+    Orchestrator --> Validator
+    Orchestrator -- "INSERT terminal<br/>(succeeded/failed)" --> DB
 ```
 
 Puntos clave del flujo:
 
-- **El adaptador nunca escribe en la base.** Solo el orquestador de análisis hace el
-  `INSERT` terminal, y lo hace una única vez por intento aceptado. Esto evita que una
-  respuesta tardía de un adaptador que ignoró el `AbortSignal` pise un resultado ya
-  persistido (ver §6).
-- **Ingesta y consulta** son CRUD simple sobre `logs`, sin pasar por el adaptador.
-- **Análisis** es un paso síncrono: el cliente espera la respuesta HTTP con el
-  resultado ya persistido (201) o el fallo ya persistido (502/504 con el ID consultable).
+- **Ingesta y consulta** son operaciones simples sobre `logs`, sin pasar por el LLM.
+- **Análisis** es síncrono: el cliente espera la respuesta HTTP con el resultado ya
+  persistido (`201`) o el fallo ya persistido (`502`/`504`, con el ID consultable).
+- **Solo el orquestador escribe en la base**, una única vez por intento aceptado. El
+  adaptador y el cliente LLM nunca persisten nada. Así una respuesta tardía de un
+  cliente que ignoró el `AbortSignal` no puede pisar un resultado ya guardado (§6).
+- **Lo único que cambia entre mock y proveedor real es el `LlmClient`** (prompt →
+  texto). Construcción del prompt, parseo, validación, timeout y persistencia son
+  el mismo código en ambos casos, así que los tests de "formato inesperado" ejercen
+  lo mismo que enfrentaría un modelo real.
 
 ## 2. Modelo de datos
 
@@ -79,153 +82,151 @@ erDiagram
 ```
 
 - `logs.level` restringido por `CHECK` a `DEBUG | INFO | WARN | ERROR`.
-- `logs.timestamp` es `timestamptz`: se recibe con offset/zona explícita y se
-  normaliza a UTC al guardar y al responder.
-- `analyses.status` restringido por `CHECK` a `succeeded | failed`. No existe estado
-  `pending`: el endpoint es síncrono, así que una fila de `analyses` solo se crea
-  cuando el intento ya terminó (éxito o fallo terminal).
-- `analyses.log_ids` guarda los IDs exactos de los logs que formaron el lote
-  analizado (array acotado a ≤100 elementos), para poder auditar qué evidencia
-  sustenta un resultado sin necesitar una tabla intermedia (ver alternativas, §5).
-- `analyses.result` es `JSONB` cuando `status = 'succeeded'` y `NULL` cuando
-  `status = 'failed'`; en ese caso `error_code` guarda un código seguro
-  (`ADAPTER_ERROR` | `ADAPTER_TIMEOUT` | `INVALID_ADAPTER_OUTPUT`), nunca el mensaje
-  crudo del proveedor.
-- Índices: `logs(service, level, timestamp DESC)` para soportar filtros combinados +
-  orden de listado; `logs(timestamp DESC, id DESC)` para el caso sin filtros;
-  `analyses(created_at DESC)` para listados administrativos futuros (no expuestos
-  todavía, documentado como extensión).
+- `logs.timestamp` es `timestamptz`: se recibe con offset explícito y se devuelve en UTC.
+- `analyses.status` restringido a `succeeded | failed`. No hay estado `pending`: el
+  endpoint es síncrono, así que la fila se crea cuando el intento ya terminó.
+- `analyses.log_ids` guarda los IDs exactos del lote analizado (≤100), para auditar
+  qué evidencia sustenta un resultado sin tabla intermedia (ver §5).
+- `analyses.result` es `JSONB` si `status = 'succeeded'` y `NULL` si `failed`; en ese
+  caso `error_code` guarda un código seguro (`ADAPTER_ERROR` | `ADAPTER_TIMEOUT` |
+  `INVALID_ADAPTER_OUTPUT`), nunca el mensaje crudo del proveedor. Un `CHECK`
+  garantiza esa combinación a nivel base.
+- `analyses.adapter` registra qué cliente produjo el resultado (`llm:mock-v1`,
+  `llm:openai-compatible:<modelo>`).
+- Índices: `logs(service, level, timestamp DESC)` para filtros combinados y la
+  agregación; `logs(timestamp DESC, id DESC)` para el listado sin filtros;
+  `analyses(created_at DESC)` para un futuro listado de análisis.
 
 ## 3. Contrato HTTP
 
 | Método | Ruta | Éxito | Errores |
 |---|---|---|---|
 | `POST` | `/api/logs` | `201` + log creado | `400` validación |
-| `GET` | `/api/logs` | `200` + lista (incluso vacía) | `400` filtros inválidos |
-| `POST` | `/api/logs/analyze` | `201` + resultado + `Location` | `422` lote vacío/excedido, `502` adaptador, `504` timeout |
+| `GET` | `/api/logs` | `200` + lista (incluso vacía) | `400` filtros inválidos o rango invertido |
+| `GET` | `/api/logs/stats` | `200` + conteo por servicio/nivel y total | `400` rango faltante, inválido o invertido |
+| `POST` | `/api/logs/analyze` | `201` + resultado + header `Location` | `400` validación/rango, `422` lote vacío o excedido, `502` error o salida inválida del LLM, `504` timeout |
 | `GET` | `/api/analysis/:id` | `200` (succeeded o failed) | `400` ID inválido, `404` no existe |
-| `GET` | `/api/health` | `200` DB ok | `503` DB no responde |
+| `GET` | `/api/health` | `200` base ok | `503` base no responde |
 
 Reglas transversales:
 
-- Errores siempre `{ "error": { "code": "...", "message": "..." } }`, sin stack
-  traces ni detalles internos del adaptador o de PostgreSQL.
-- `GET /api/logs`: filtros `service`, `level`, `from`, `to`, `limit`. Intervalo
-  `[from, to)` semiabierto (evita doble conteo en consultas consecutivas). Salida en
-  UTC (`toISOString`). Orden `timestamp DESC, id DESC` (estable aun con timestamps
-  duplicados). `limit` por defecto 50, máximo 500 — documentado en README, sin
-  paginación por cursor (extra opcional, fuera de alcance, ver §5).
-- `POST /api/logs/analyze`: `from`/`to` obligatorios, `service`/`level` opcionales.
-  Selección determinista (mismo orden que el listado) de hasta 101 filas: si la
-  fila 101 existe, el lote excede el límite documentado de 100 y se responde `422`
-  sin tocar el adaptador. También `422` si el lote resulta vacío, o si el tamaño
-  serializado del lote supera el límite de bytes documentado (protege al adaptador
-  mock y a un proveedor real de payloads desproporcionados).
+- Errores siempre `{ "error": { "code", "message" } }`, sin stack traces ni detalles
+  internos del proveedor o de PostgreSQL. Los errores de validación agregan
+  `details: [{ field, message }]` con el campo que falló.
+  `POST /api/logs/analyze` fallido agrega `analysisId` al mismo sobre.
+- Timestamps: ISO 8601 con offset obligatorio (`Z` o `±HH:MM`), hasta milisegundos.
+  Se rechazan fechas de calendario inexistentes (30 de febrero).
+- Rangos: intervalo semiabierto `[from, to)`. `from >= to` es `400 INVALID_RANGE`, no
+  una lista vacía: un rango invertido es un error del cliente, no "no hay datos".
+- `service` y `message` no pueden ser solo espacios ni contener el byte NUL
+  (PostgreSQL lo rechaza en columnas `text`; sin la validación terminaba en `500`).
+- `GET /api/logs`: filtros `service`, `level`, `from`, `to`, `limit` (default 50,
+  máximo 500). Orden `timestamp DESC, id DESC` (estable aun con timestamps repetidos).
+- `GET /api/logs/stats`: `from` y `to` obligatorios, para no permitir un `GROUP BY`
+  sobre toda la tabla.
+- `POST /api/logs/analyze`: `from`/`to` obligatorios, `service`/`level` opcionales. Se
+  seleccionan hasta 101 filas con el mismo orden del listado: si existe la 101, el
+  lote excede el límite de 100 y se responde `422` sin llamar al LLM. También `422`
+  si el lote está vacío o si su tamaño serializado supera `ANALYSIS_MAX_BYTES`.
 
-## 4. Integración con IA — adaptador mock y camino a producción
-
-`AnalysisAdapter` es una interfaz mínima:
+## 4. Integración con el LLM
 
 ```ts
-interface AnalysisAdapter {
+interface LlmClient {                 // lo único específico de cada proveedor
   readonly name: string;
-  analyze(input: { logs: LogRecord[] }, signal: AbortSignal): Promise<AnalysisOutput>;
+  complete(prompt: { system: string; user: string }, signal: AbortSignal): Promise<string>;
 }
 ```
 
-- **Implementación activa:** `MockAnalysisAdapter`, determinista: agrupa el lote por
-  `service`/`level`, deriva `summary` (texto generado a partir de los conteos reales),
-  `categories` (p. ej. `connection_errors`, `timeout`, `validation`, agrupadas por
-  coincidencia de patrones en `message`) y `suggestions` (reglas simples ligadas a
-  las categorías detectadas). Sin hallazgos → `categories: []` y un `summary`
-  explícito de "sin anomalías detectadas", no un array vacío silencioso.
-- **Validación en runtime:** la salida del adaptador (mock o real) se valida contra
-  un esquema antes de persistir: tipos de `summary`/`categories`/`suggestions`,
-  cantidades razonables, y que **cada ID de evidencia citado pertenezca al lote**
-  enviado (si el adaptador "alucina" un ID fuera del lote, se trata como salida
-  inválida → `502`).
-- **Camino a un proveedor real:** se agrega un `HttpLlmAdapter` que implementa la
-  misma interfaz, construye el prompt con los logs serializados y una instrucción de
-  sistema separada, llama al proveedor (OpenAI/Anthropic/Gemini) con la API key desde
-  variable de entorno, y parsea/valida la respuesta con el mismo validador de
-  esquema. El `AnalysisOrchestrator` no cambia: solo cambia qué adaptador se inyecta
-  (factory por variable de entorno `ANALYSIS_ADAPTER=mock|http`).
-- **Datos sensibles:** los logs pueden contener fragmentos de PII o secretos
-  filtrados por error. Documentado en README: (a) nunca se envían logs `DEBUG` sin
-  revisión, (b) se recomienda un paso de *redacción* (regex para emails, tokens tipo
-  `Bearer ...`, IPs) antes de serializar el lote hacia un proveedor real — no
-  implementado en el mock porque no sale de proceso, pero sí queda como requisito
-  documentado del `HttpLlmAdapter`.
-- **Separar instrucciones de datos no confiables:** el prompt real usaría un mensaje
-  de sistema fijo (las instrucciones) y pasaría los logs como un bloque de datos
-  claramente delimitado (p. ej. JSON en un mensaje de rol `user` separado, nunca
-  concatenado a la instrucción). Esto evita que un `message` de log con texto tipo
-  "ignore previous instructions" sea interpretado como instrucción por el LLM. El
-  validador de esquema de salida es la segunda barrera: cualquier intento de
-  inyección que no respete el esquema o cite IDs fuera del lote se descarta como
-  `502 INVALID_ADAPTER_OUTPUT`.
+`LlmAnalysisAdapter` (implementa `AnalysisAdapter`) hace tres cosas:
+
+1. **Construye el prompt** (`llm/prompt.ts`). Las instrucciones van en el mensaje de
+   sistema, fijo. Los logs van en el mensaje de usuario como JSON
+   (`{"logs":[{id, service, level, timestamp, message}]}`), nunca concatenados a la
+   instrucción, y el sistema le indica al modelo que todo eso es dato. Así un
+   `message` con "ignore previous instructions" sigue siendo un string.
+   Antes de salir del proceso se enmascaran emails, tokens `Bearer` y pares
+   `password=`/`token=`/`api_key=`.
+2. **Llama al `LlmClient`** con el `AbortSignal` del orquestador.
+3. **Parsea el texto** (`llm/parse-response.ts`). Acepta JSON plano o envuelto en un
+   bloque ```` ```json ````, que es la desviación más común de los modelos. Todo lo
+   demás (prosa, JSON truncado, respuesta vacía) es `INVALID_ADAPTER_OUTPUT`.
+   Intentar "rescatar" JSON de una respuesta en prosa esconde fallas reales del modelo.
+
+Después, el orquestador **valida la salida contra el lote** (`validate-output.ts`):
+tipos, cantidades máximas, y que cada `evidenceLogIds` pertenezca al lote enviado. Un
+ID inventado por el modelo es salida inválida (`502`). Es la segunda barrera contra
+prompt injection: aunque el modelo "obedezca" a un log, lo que no respete el esquema
+no se persiste.
+
+Clientes disponibles, elegidos con `ANALYSIS_ADAPTER`:
+
+- **`mock` (default)** — `MockLlmClient`: lee los logs del mensaje de usuario, aplica
+  heurísticas deterministas (`heuristics.ts`, reglas por patrón sobre WARN/ERROR) y
+  devuelve la respuesta como texto JSON, igual que un proveedor. `docker compose up`
+  funciona sin red ni API key y la demo es reproducible.
+- **`openai-compatible`** — `OpenAiCompatibleClient`: `POST {LLM_BASE_URL}/chat/completions`
+  con `temperature: 0` y `response_format: json_object`. Un solo cliente cubre Ollama
+  (local, gratis), Gemini (free tier, vía su endpoint compatible) y OpenAI. Reenvía el
+  `AbortSignal` a `fetch`, así que el timeout cancela la request HTTP de verdad. Ante
+  un status no-2xx lanza un error con el código HTTP solamente: el cuerpo del
+  proveedor puede contener partes del prompt.
 
 ## 5. Decisiones técnicas y alternativas descartadas
 
 | Decisión | Alternativa descartada | Motivo |
 |---|---|---|
-| Node.js 24 LTS + TypeScript + Fastify 5 | Java + Spring Boot | Mayor velocidad de desarrollo en el tiempo disponible (10–15 h); Fastify da validación por esquema y bajo overhead sin boilerplate de Spring. |
-| PostgreSQL 17 + `pg` con SQL parametrizado | Prisma/TypeORM, o SQLite | SQL explícito hace auditable cada query (relevante para la defensa técnica); evita la "caja negra" de un ORM. SQLite se descartó porque el enunciado pide un modelo relacional con agregación, y Postgres es el estándar de facto para microservicios reales. |
-| Monolito modular (un proceso, módulos `logs`/`analysis` separados) | Microservicios separados (logs-service, analysis-service) | El alcance (un prototipo, 5 endpoints) no justifica la complejidad operativa de red/descubrimiento entre servicios. Separación lógica por módulo ya da el aislamiento necesario para testear y defender cada pieza. |
-| Análisis síncrono con timeout acotado | Cola (BullMQ/SQS) + worker asíncrono con `202`/polling | Un flujo de cola es más robusto para proveedores lentos reales, pero agrega infraestructura (estado `pending`, locking, polling) que no es defendible en el tiempo disponible. Se exploró en el primer commit del repo y se descartó por esa razón (ver nota al inicio de este documento). Documentado como evolución natural si el proveedor real introduce latencia alta. |
-| Adaptador mock determinista detrás de interfaz `AnalysisAdapter` | Proveedor real (OpenAI/Anthropic) en el flujo principal | El enunciado lo permite explícitamente. Mock determinista permite que el evaluador reproduzca la demo sin red ni API key, y las pruebas de timeout/formato inesperado son deterministas en CI. La interfaz deja el cambio a un proveedor real como una sola pieza intercambiable. |
-| `analyses.result` como `JSONB` + `log_ids uuid[]` | Tablas normalizadas por categoría/sugerencia, tabla intermedia `analysis_logs` | El resultado se consulta siempre completo por ID (no hay queries relacionales sobre categorías individuales en el alcance actual). Un array acotado a ≤100 IDs es más simple que una tabla intermedia y no genera N+1. Si se agrega retención/borrado de logs analizados, esta decisión se revisa (el array no tiene integridad referencial). |
-| Timeout propio con `setTimeout` + `Promise.race`, limpieza garantizada | Confiar únicamente en `AbortSignal` | El enunciado exige que el timeout resuelva aun si el adaptador ignora la señal de aborto. Se usa `Promise.race` entre la promesa del adaptador y un temporizador; se propaga `AbortSignal` igual (buenas prácticas / proveedores reales sí lo respetan), pero el temporizador es la garantía dura. El temporizador se limpia en ambos casos para no dejar handles colgados. |
-| Vitest | Jest | Arranque más rápido con TS nativo (sin `ts-jest`/Babel), API compatible con Jest (baja fricción), y mejor soporte ESM — relevante porque el proyecto usa TypeScript con `"module": "NodeNext"`. |
-| Sin paginación por cursor en `GET /api/logs` (solo `limit`) | Cursor/keyset pagination | Listado en el enunciado es "con filtros", no pagineado explícitamente. `limit` acotado + orden estable es suficiente para el prototipo; cursor queda documentado como extra no implementado. |
-| Errores propios `{error:{code,message}}` | RFC 9457 (`application/problem+json`) | Un formato propio chico es más rápido de implementar y de testear exhaustivamente en el tiempo disponible; RFC 9457 es más estándar pero agrega campos (`type`, `title`, `instance`) que no aportan en un prototipo de 5 endpoints. Se documenta como mejora natural si la API crece. |
-| Runner de migraciones propio (~40 líneas, tabla `schema_migrations`, aplica `db/migrations/*.sql` en orden dentro de una transacción) | `node-pg-migrate` u otra librería | Solo se necesita aplicar SQL versionado en orden y no duplicar en reinicios; una librería completa (rollback, generación de migraciones, CLI) es más superficie de la que el alcance justifica. Se reconsidera si el esquema empieza a necesitar rollbacks reales. |
-| Sin CI | GitHub Actions | El enunciado marca CI como extra opcional condicionado a que "lo obligatorio ya funcione". Se agrega solo si sobra tiempo tras Etapa 4. |
+| Node.js 24 + TypeScript + Fastify 5 | Java + Spring Boot | Más velocidad de desarrollo para 10–15 h. Fastify trae validación por JSON Schema sin el boilerplate de Spring. |
+| PostgreSQL 17 + `pg` con SQL parametrizado | Prisma/TypeORM, o SQLite | SQL explícito hace auditable cada query. Postgres da `timestamptz`, `jsonb`, arrays y `CHECK`s que el modelo usa. SQLite se acerca menos a lo que correría en producción. |
+| Monolito modular (`logs` / `analysis`) | Microservicios separados | Un prototipo de 6 endpoints no justifica la complejidad de red y despliegue. La separación por módulo alcanza para testear cada pieza. |
+| Análisis síncrono con timeout | Cola (BullMQ/SQS) + worker, `202` + polling | La cola es más robusta con proveedores lentos, pero agrega estado `pending`, locking y polling. Se exploró y se descartó por tiempo. Es la evolución natural si un modelo real tarda decenas de segundos. |
+| `LlmClient` que devuelve texto + adaptador que parsea | Mock que devuelve el objeto ya armado | La primera versión del mock devolvía el objeto final, y el parseo de una respuesta real (prosa, fences, JSON truncado) no tenía código ni tests. Con la separación, mock y proveedor real recorren el mismo parser y validador. |
+| Un cliente OpenAI-compatible | Un SDK por proveedor (OpenAI, Anthropic, Gemini) | Una sola implementación con `fetch` cubre Ollama local, Gemini gratis y OpenAI, sin dependencias nuevas. Un SDK específico se justifica si se necesitan features propias (tool use, streaming). |
+| Parser estricto (solo tolera fences) | Extraer "el primer `{...}`" de cualquier respuesta | Ser permisivo esconde fallas del modelo y puede tomar el JSON equivocado. Con `response_format: json_object` la prosa es rara. |
+| `analyses.result` como `JSONB` + `log_ids uuid[]` | Tablas normalizadas por categoría/sugerencia y tabla intermedia `analysis_logs` | El resultado siempre se lee completo por ID. Un array de ≤100 IDs es más simple que una tabla intermedia. Si se agrega borrado de logs, se revisa (el array no tiene integridad referencial). |
+| Timeout propio (`setTimeout` + `Promise.race`) | Confiar solo en `AbortSignal` | El timeout tiene que cumplirse aunque el cliente ignore la señal. Se propaga el `AbortSignal` igual (el cliente HTTP lo respeta), pero el temporizador es la garantía. |
+| Vitest | Jest | TypeScript y ESM nativos sin `ts-jest`/Babel. API compatible con Jest. |
+| Tests de integración contra PostgreSQL real | Mock de la base | Los `CHECK`, `jsonb`, arrays y `timestamptz` son parte de lo que se prueba. Un mock no los reproduce. |
+| Solo `limit`, sin paginación por cursor | Cursor/keyset pagination | La letra pide "listar con filtros". `limit` acotado + orden estable alcanza para el prototipo. |
+| Errores propios `{error:{code,message,details?}}` | RFC 9457 (`application/problem+json`) | Más chico de implementar y testear. RFC 9457 es la mejora natural si la API crece. |
+| Runner de migraciones propio (~40 líneas) | `node-pg-migrate` | Solo hace falta aplicar SQL versionado en orden y no duplicar. Rollbacks y CLI son superficie que el alcance no necesita. |
+| CI con GitHub Actions (tests + `docker compose up`) | Sin CI | Corre typecheck y tests contra Postgres, y comprueba de forma automática que `docker compose up` levanta todo sin pasos extra. |
 
-## 6. Fallos, reintentos y qué pasa si el proceso cae
+## 6. Fallos y reintentos
 
-- **Caída del proceso entre el `SELECT` del lote y el `INSERT` terminal:** el intento
-  se pierde sin dejar fila en `analyses` (no hay estado intermedio `pending`
-  persistido). El cliente recibe un error de conexión/timeout de red, no una
-  respuesta HTTP del servidor. Es seguro reintentar el mismo `POST
-  /api/logs/analyze`: como no quedó fila, no hay duplicado posible.
-- **El cliente repite el `POST` después de perder la respuesta pero el servidor sí
-  llegó a persistir:** hoy esto puede crear dos filas `analyses` distintas para el
-  mismo lote lógico (no hay idempotencia). Documentado como limitación del
-  prototipo: la evolución natural es aceptar una `Idempotency-Key` del cliente y
-  usar un `UNIQUE` sobre esa clave, o derivar una clave determinista de
-  `(from, to, service, level, log_ids)` con `ON CONFLICT DO NOTHING` + lectura del
-  existente.
-- **Fallo al escribir en PostgreSQL** (no al adaptador): se responde un error de
-  infraestructura (`500`) sin ID, porque no se puede prometer que el resultado sea
-  consultable después. Distinto del fallo del adaptador (`502`/`504`), que si logra
-  persistirse sí expone su ID.
-- **Respuesta tardía de un adaptador que ignoró `AbortSignal`:** el orquestador ya
-  resolvió por timeout y ya hizo su único `INSERT`. La promesa tardía del adaptador,
-  cuando finalmente resuelve o rechaza, se ignora explícitamente (no hay un segundo
-  `INSERT`/`UPDATE`); se loguea para observabilidad pero no muta estado.
+- **El proceso cae entre el `SELECT` del lote y el `INSERT` terminal:** no queda fila
+  en `analyses` (no hay estado `pending`). El cliente ve un error de red. Reintentar es
+  seguro: no hay duplicado posible.
+- **El cliente repite el `POST` tras perder la respuesta, pero el servidor sí había
+  persistido:** se crean dos filas para el mismo lote (no hay idempotencia). Solución
+  natural: header `Idempotency-Key` con `UNIQUE` en `analyses`.
+- **Falla la escritura en PostgreSQL** (no el LLM): `500` sin ID, porque no se puede
+  prometer que el resultado sea consultable. Distinto de un fallo del LLM (`502`/`504`),
+  que sí se persiste y expone su ID.
+- **El LLM responde después del timeout:** el orquestador ya respondió `504` y ya hizo
+  su único `INSERT`. La respuesta tardía se descarta sin persistir ni loguear. El fallo
+  del adaptador (error o salida inválida) sí se loguea del lado servidor con su causa,
+  sin exponerla al cliente.
+- **La base no responde:** `GET /api/health` devuelve `503` dentro de
+  `HEALTH_DB_TIMEOUT_MS`. El timeout de la consulta se aplica con `SET LOCAL` dentro
+  de una transacción para no quedar pegado a la conexión del pool.
 
-## 7. Matriz requisito → implementación → verificación
+## 7. Requisito → implementación → verificación
 
-| Requisito (desafío) | Implementación prevista | Verificación |
+| Requisito | Dónde | Cómo se verifica |
 |---|---|---|
-| Diagrama de arquitectura + decisiones | §1 y §5 de este documento | Revisión humana (esta pausa de Etapa 0) |
-| Modelo de datos logs/analyses | `db/migrations/*` (Etapa 1) | `npm run migrate` + inspección de esquema |
-| Migraciones versionadas + seed repetible | `db/migrations/`, `db/seed.ts` (Etapa 1) | Reinicio de contenedor + re-seed sin duplicados |
-| Agregación por servicio/nivel/rango | Query SQL en `src/modules/logs` (Etapa 1) | Test de integración sobre datos del seed |
-| `docker compose up` sin pasos manuales | `Dockerfile`, `docker-compose.yml`, `.env.example` (Etapa 1) | Clon limpio + `docker compose up` (Etapa 4) |
-| `GET /api/health` 200/503 acotado | Chequeo `SELECT 1` con timeout corto (Etapa 1) | Test de integración + inspección manual |
-| `POST`/`GET /api/logs` con validación y filtros | `src/routes/logs.ts` (Etapa 2) | Tests de integración (Fastify inject + Postgres real) |
-| Errores `{error:{code,message}}` | Error handler centralizado (Etapa 2) | Tests de casos inválidos |
-| `POST /api/logs/analyze` + `GET /api/analysis/:id` | `src/modules/analysis` (Etapa 3) | Tests de integración, casos límite de lote |
-| Adaptador mock + validación de salida | `src/modules/analysis/adapter` (Etapa 3) | Tests unitarios con adaptadores inyectados |
-| Timeout robusto, persistencia de fallo | `AnalysisOrchestrator` (Etapa 3) | Test con adaptador que ignora `AbortSignal` |
-| Tests unitarios + integración, casos borde | `tests/` (Etapa 2–4) | `npm test` en CI local / clon limpio |
-| README reproducible desde clon limpio | `README.md` (Etapa 4) | Ejecución real de los pasos documentados |
-| Sin secretos en el repo, ZIP con `.git` | `.gitignore`, `.env.example` (Etapa 5) | Revisión de diffs + `git log` antes de empaquetar |
+| Diagrama + decisiones | §1 y §5 | — |
+| Modelo de datos, migraciones, seed | `db/migrations/*.sql`, `db/seed.ts` | `tests/integration/startup.test.ts` (migrar y re-seed sin duplicados) |
+| Consulta de agregación | `aggregateByServiceAndLevel` + `GET /api/logs/stats` | `tests/integration/logs-aggregation.test.ts` |
+| Endpoints, validación, errores | `src/routes/*`, `src/app.ts` | `tests/integration/logs.test.ts`, `analysis.test.ts`, `error-handling.test.ts`, `health.test.ts` |
+| LLM: resumen, categorías, sugerencias | `src/analysis/llm/*`, `heuristics.ts` | `tests/unit/llm-*.test.ts`, `heuristics.test.ts` |
+| LLM: respuesta válida / formato inesperado / timeout | `parse-response.ts`, `validate-output.ts`, `run-with-timeout.ts` | `tests/integration/analysis.test.ts` ("through the LLM adapter"), `tests/unit/run-with-timeout.test.ts` |
+| Cliente de proveedor real | `openai-compatible-client.ts` | `tests/integration/openai-compatible-client.test.ts` (servidor HTTP falso local) |
+| Persistencia de cada análisis | `src/analysis/repository.ts` | `tests/integration/analysis.test.ts` |
+| `docker compose up` sin pasos extra | `Dockerfile`, `docker-compose.yml`, `docker/entrypoint.sh` | Job `compose` de `.github/workflows/ci.yml` |
 
-## 8. Fuera de alcance (documentado, no implementado)
+## 8. Fuera de alcance
 
-UI, proveedor de LLM real pago, cola/worker asíncrono, reverse proxy, documentación
-OpenAPI formal, paginación por cursor, despliegue público, idempotencia de
-`POST /api/logs/analyze`. CI se evalúa al final solo si sobra tiempo.
+UI, cola/worker asíncrono, reverse proxy, documentación OpenAPI, paginación por
+cursor, idempotencia de `POST /api/logs/analyze`, listado de análisis, retención de
+logs. Ver README, "Qué quedó afuera".

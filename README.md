@@ -1,21 +1,16 @@
 # SmartLog Analyzer
 
-Prototipo interno que recibe logs de varios microservicios, los almacena y usa un
-adaptador de IA (mock determinista, intercambiable por un proveedor real) para
-generar un resumen, categorías y sugerencias. Las decisiones técnicas y el
-contrato HTTP completo están en [ARCHITECTURE.md](ARCHITECTURE.md).
+Prototipo interno que recibe logs de varios microservicios, los guarda en
+PostgreSQL y usa un LLM para generar un resumen, categorizar los problemas y
+sugerir acciones. Por defecto usa un LLM simulado (sin red ni API key); se puede
+apuntar a un modelo real con variables de entorno.
 
-> **Estado:** funcional end-to-end y auditado (Etapa 5 de 5). Arranque,
-> migraciones, seed, ingesta/listado de logs y análisis (adaptador mock)
-> están implementados, verificados contra Docker + PostgreSQL real dos veces
-> desde un clon limpio, y pasaron una auditoría completa de código y
-> seguridad que corrigió 5 problemas reales (ver
-> [Verificación](#verificación) y [Uso de IA](#uso-de-ia-durante-el-desarrollo)).
+Decisiones técnicas, diagrama y contrato HTTP: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Requisitos
 
-- Docker Desktop (con Docker Compose v2), para levantar la app y PostgreSQL con un solo comando.
-- Node.js 24+ y npm, solo si querés correr la app o los tests fuera de Docker.
+- Docker con Docker Compose v2.
+- Node.js 24+ y npm, solo para correr los tests o la app fuera de Docker.
 
 ## Cómo levantarlo
 
@@ -23,106 +18,105 @@ contrato HTTP completo están en [ARCHITECTURE.md](ARCHITECTURE.md).
 docker compose up --build
 ```
 
-No hace falta crear un `.env`: todas las variables tienen defaults de
-desarrollo en `docker-compose.yml`. Al arrancar, el contenedor `app`:
-
-1. Espera a que `db` esté sana (`pg_isready`).
-2. Corre las migraciones (`db/migrations/*.sql`, versionadas y sin duplicar en reinicios).
-3. Carga el seed de demo (datos sintéticos, idempotente).
-4. Levanta el servidor HTTP.
-
-Para comprobar que está funcionando:
+No hace falta crear un `.env`: todas las variables tienen defaults de desarrollo.
+Al arrancar, el contenedor `app` espera a que la base esté sana, corre las
+migraciones, carga el seed (29 logs sintéticos de 4 servicios, todos del
+`2026-11-01` UTC; idempotente) y levanta la API en `http://localhost:3000`.
 
 ```bash
 curl http://localhost:3000/api/health
+# {"status":"ok","checks":{"database":"ok"}}
 ```
 
-```json
-{ "status": "ok", "checks": { "database": "ok" } }
-```
+Para detenerlo y borrar los datos: `docker compose down -v`.
 
-### Demo de los endpoints
-
-El seed carga 29 logs sintéticos de 4 servicios, todos con `timestamp` dentro
-del día `2026-11-01` (UTC). Con la app arriba:
+### Probar los endpoints
 
 ```bash
-# Listar con filtros combinados
-curl "http://localhost:3000/api/logs?service=payments-api&level=ERROR"
-```
-
-```bash
-# Ingestar un log nuevo
+# Ingestar un log
 curl -X POST http://localhost:3000/api/logs \
   -H "Content-Type: application/json" \
-  -d '{"service":"demo","level":"INFO","message":"hello","timestamp":"2026-11-06T12:00:00Z"}'
-```
+  -d '{"service":"demo","level":"ERROR","message":"Connection refused to cache","timestamp":"2026-11-01T12:00:00Z"}'
 
-```bash
-# Analizar el lote sembrado (devuelve 201 + el resultado ya persistido)
+# Listar con filtros (service, level, from, to, limit)
+curl "http://localhost:3000/api/logs?service=payments-api&level=ERROR"
+
+# Agregación: cantidad de logs por servicio y nivel en un rango
+curl "http://localhost:3000/api/logs/stats?from=2026-11-01T00:00:00Z&to=2026-11-02T00:00:00Z"
+
+# Analizar un rango con el LLM (201 + resultado persistido; el id también viene en el header Location)
 curl -X POST http://localhost:3000/api/logs/analyze \
   -H "Content-Type: application/json" \
   -d '{"from":"2026-11-01T00:00:00Z","to":"2026-11-02T00:00:00Z"}'
-```
 
-```bash
-# Recuperar ese mismo análisis por id (el id viene en la respuesta anterior y en el header Location)
+# Recuperar el análisis
 curl http://localhost:3000/api/analysis/<id>
 ```
 
-Para detenerlo y borrar también los datos:
+Los errores siempre tienen la forma `{"error":{"code","message"}}`; los de
+validación agregan `details` con el campo que falló.
+
+### Usar un LLM real
+
+El mismo cliente sirve para cualquier proveedor con API compatible con OpenAI
+(`POST /chat/completions`). Crear un `.env` junto al `docker-compose.yml`:
 
 ```bash
-docker compose down -v
+# Ollama local (gratis). Antes: `ollama pull llama3.1`
+ANALYSIS_ADAPTER=openai-compatible
+LLM_BASE_URL=http://host.docker.internal:11434/v1
+LLM_MODEL=llama3.1
+ANALYSIS_TIMEOUT_MS=30000
 ```
 
-> **Nota (Windows + Docker Desktop):** en esta máquina, con WSL2 instalado
-> el mismo día, `curl`/`fetch` desde el host a `localhost:3000` a veces se
-> queda colgado sin respuesta aunque el contenedor esté sano — es
-> intermitencia conocida del proxy de puertos de Docker Desktop en Windows,
-> no de la app. Se confirmó con tres herramientas de cliente distintas
-> (`curl`, `Invoke-WebRequest`, `fetch` de Node) y comparando contra:
-> `docker compose exec app node -e "fetch('http://127.0.0.1:3000/...')"`
-> (siempre responde) y `docker compose ps` (el healthcheck de `app` lo marca
-> `(healthy)` de forma constante). Si te pasa, probá `127.0.0.1` en vez de
-> `localhost`, o reiniciá Docker Desktop.
+```bash
+# Gemini (free tier, API key de https://aistudio.google.com)
+ANALYSIS_ADAPTER=openai-compatible
+LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+LLM_MODEL=<un modelo "flash" de la lista de AI Studio>
+LLM_API_KEY=<tu-key>
+ANALYSIS_TIMEOUT_MS=30000
+```
+
+y volver a correr `docker compose up --build`. El campo `adapter` de cada análisis
+indica qué cliente lo generó (`llm:mock-v1` o `llm:openai-compatible:<modelo>`).
+En Linux, `host.docker.internal` requiere agregar
+`extra_hosts: ["host.docker.internal:host-gateway"]` al servicio `app`.
 
 ## Cómo correr los tests
 
+Los tests de integración usan un PostgreSQL real (no un mock de la base). Lo más
+simple es levantar solo la base del compose, publicada en `127.0.0.1:5432`:
+
 ```bash
 npm ci
-npm test
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d db
+TEST_DATABASE_URL=postgresql://smartlog:smartlog-dev@localhost:5432/smartlog npm test
 ```
 
 | Comando | Qué corre | Necesita Postgres |
 |---|---|---|
-| `npm test` | Todos los tests | Sí (integración) |
+| `npm test` | Todo | Sí |
 | `npm run test:unit` | Solo unitarios | No |
 | `npm run test:integration` | Solo integración | Sí |
-| `npm run typecheck` | Verificación de tipos | No |
+| `npm run typecheck` | Tipos | No |
 
-Los tests de integración usan PostgreSQL real, nunca un mock de base de datos
-(ver ARCHITECTURE.md §5). Apuntan a `TEST_DATABASE_URL` (o `DATABASE_URL` si
-no está definida). Para levantar solo la base de datos y correrlos desde el
-host:
+El CI (`.github/workflows/ci.yml`) corre lo mismo en cada push y, en un segundo
+job, `docker compose up --build --wait` + requests reales contra la API.
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d db
-```
-
-```bash
-TEST_DATABASE_URL=postgresql://smartlog:smartlog-dev@localhost:5432/smartlog npm test
-```
+Qué cubren, a grandes rasgos: validación y casos borde de cada endpoint (fechas
+imposibles, rangos invertidos, NUL bytes, campos extra, límites), el formato de
+error, el health check con la base caída, y el análisis con un LLM que responde
+bien, que responde prosa / JSON truncado / JSON con forma incorrecta / IDs
+inventados, que tarda más que el timeout, y que falla. El cliente HTTP real se
+prueba contra un servidor falso local.
 
 ## Desarrollo local
-
-Para ver los cambios sin reconstruir la imagen, corré la base en Docker y la app en tu máquina:
 
 ```bash
 cp .env.example .env
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d db
-npm run migrate
-npm run seed
+npm run migrate && npm run seed
 npm run dev
 ```
 
@@ -130,161 +124,84 @@ npm run dev
 
 | Servicio | Puerto interno | Publicado en el host | Red |
 |---|---|---|---|
-| `app` | 3000 | `APP_PORT`, por defecto 3000 | `smartlog` |
-| `db` | 5432 | No, salvo con `docker-compose.dev.yml` (`DB_PORT`, por defecto 5432, solo en `127.0.0.1`) | `smartlog` |
+| `app` | 3000 | `APP_PORT` (default 3000) | `smartlog` |
+| `db` | 5432 | No; solo con `docker-compose.dev.yml` en `127.0.0.1:${DB_PORT:-5432}` | `smartlog` |
 
-La app llega a la base por el nombre `db` dentro de la red `smartlog`. Los datos persisten en el volumen `db-data`.
+La app llega a la base por el nombre `db` dentro de la red `smartlog`. Los datos
+persisten en el volumen `db-data`.
 
 ## Variables de entorno
 
-Todas son opcionales con `docker compose up` (tienen default de desarrollo).
-Documentadas en [.env.example](.env.example).
+Todas opcionales con `docker compose up`. Ver [.env.example](.env.example).
 
-| Variable | Default | Para qué sirve |
+| Variable | Default | Para qué |
 |---|---|---|
-| `PORT` / `HOST` | `3000` / `0.0.0.0` | Dónde escucha la API |
-| `DATABASE_URL` | la arma `docker-compose.yml` | Cadena de conexión a PostgreSQL |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `smartlog` / `smartlog-dev` / `smartlog` | Credenciales de desarrollo del contenedor `db` |
-| `LOG_LEVEL` | `info` | Nivel de log de la app (Fastify/pino) |
-| `HEALTH_DB_TIMEOUT_MS` | `1000` | Presupuesto de `GET /api/health` para decidir si la base no responde |
-| `ANALYSIS_TIMEOUT_MS` | `5000` | Timeout del adaptador de análisis |
-| `ANALYSIS_MAX_LOGS` | `100` | Tamaño máximo de lote para `POST /api/logs/analyze` |
-| `ANALYSIS_MAX_BYTES` | `200000` | Tamaño serializado máximo del lote |
+| `APP_PORT` | `3000` | Puerto publicado en el host |
+| `PORT` / `HOST` | `3000` / `0.0.0.0` | Dónde escucha la API dentro del contenedor |
+| `DATABASE_URL` | la arma el compose | Conexión a PostgreSQL |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `smartlog` / `smartlog-dev` / `smartlog` | Credenciales de desarrollo |
+| `LOG_LEVEL` | `info` | Nivel de log (pino) |
+| `HEALTH_DB_TIMEOUT_MS` | `1000` | Tiempo máximo del health check contra la base |
+| `ANALYSIS_ADAPTER` | `mock` | `mock` o `openai-compatible` |
+| `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | — | Proveedor real (requeridas las dos primeras si `openai-compatible`) |
+| `ANALYSIS_TIMEOUT_MS` | `5000` | Timeout del LLM (subirlo a ~30000 con un modelo real) |
+| `ANALYSIS_MAX_LOGS` / `ANALYSIS_MAX_BYTES` | `100` / `200000` | Tamaño máximo del lote a analizar |
 | `LOGS_DEFAULT_LIMIT` / `LOGS_MAX_LIMIT` | `50` / `500` | Límites de `GET /api/logs` |
 
-La app valida su configuración al arrancar: si una variable es inválida, el
-proceso no levanta e indica qué variable falló, nunca su valor.
+La configuración se valida al arrancar: si una variable es inválida, el proceso
+no levanta e indica cuál (nunca su valor).
 
-## Verificación
+## Cómo usé IA durante el desarrollo
 
-Esto no es una lista de intenciones: se corrió de verdad, desde un **clon
-limpio** en un directorio nuevo, el día de la entrega.
+Usé Claude Code (Anthropic) como asistente en sesiones dirigidas: yo definía el
+enfoque y revisaba cada cambio antes de aceptarlo.
 
-```bash
-git clone <url-del-repo> smartlog-analyzer-verify && cd smartlog-analyzer-verify
-docker compose up --build -d
-```
+**Lo que más aportó**
+- Un primer borrador de `ARCHITECTURE.md` a partir de mi brief, que discutí y
+  ajusté antes de escribir código.
+- El código repetitivo (schemas de Fastify, repositorios SQL, error handler) de
+  forma consistente entre módulos.
+- Diseñar casos borde de tests: timeout con respuesta tardía que no debe pisar el
+  resultado, fallo real de persistencia vía un `CHECK` de Postgres, respuestas
+  malformadas del LLM.
+- Una revisión final del código contra la letra, que encontró problemas que
+  después corregí con su test: el health check dejaba un `statement_timeout` de
+  1 s pegado a conexiones del pool, un byte NUL en un log daba `500`, un rango
+  invertido devolvía una lista vacía, y el mock devolvía un objeto ya armado, así
+  que el parseo de una respuesta real de un LLM no tenía código ni tests.
 
-Resultado real (logs del contenedor `app`):
+**Lo que corregí o descarté**
+- El primer diseño propuesto era asincrónico (cola, `202` + polling, RFC 9457).
+  Lo descarté por un flujo síncrono más simple de verificar en el tiempo
+  disponible (queda en la rama `stage-1-walking-skeleton`).
+- El código inicial se escribió sin correr contra Postgres. Al ejecutarlo
+  aparecieron bugs que el typecheck no detectaba: Fastify descartaba en silencio
+  campos no declarados, `Date.parse` aceptaba el 30 de febrero, y los tests de
+  integración se pisaban entre sí al correr en paralelo.
+- Una pasada contra el contenedor real encontró que los errores propios de
+  Fastify (JSON malformado, body demasiado grande) salían como `500` en vez de su
+  código real, y que el contenedor corría como `root`.
+- Para el parser de respuestas del LLM descarté la opción permisiva de "buscar el
+  primer `{...}` en el texto": esconde fallas del modelo.
 
-```
-[entrypoint] running migrations...
-Applied 2 migration(s): 0001_create_logs.sql, 0002_create_analyses.sql
-[entrypoint] seeding demo data...
-Seed complete: 29 inserted, 0 already present.
-[entrypoint] starting server...
-{"level":30,...,"msg":"Server listening at http://127.0.0.1:3000"}
-```
+Lo que más aprendí: compilar y pasar el typecheck no reemplaza correr contra la
+base y el contenedor reales. Casi todos los bugs aparecieron solo al ejecutar.
 
-Demo HTTP real contra ese contenedor (health → seed → ingesta → filtros →
-análisis → recuperación por id), en orden:
+## Qué quedó afuera y cómo lo resolvería
 
-| Paso | Resultado real |
+| Qué | Cómo lo resolvería |
 |---|---|
-| `GET /api/health` | `200 {"status":"ok","checks":{"database":"ok"}}` |
-| `GET /api/logs?limit=500` | 29 items (el seed, nada de más ni de menos) |
-| `POST /api/logs` | `201` con el log creado |
-| `GET /api/logs?service=demo-clone&level=WARN` | `200` con exactamente el log recién creado |
-| `POST /api/logs/analyze` (rango `2026-11-01`) | `201`, `status:"succeeded"`, 5 categorías detectadas |
-| `GET /api/analysis/{id}` | `200` con el mismo resultado persistido |
+| Idempotencia de `POST /api/logs/analyze` | Header `Idempotency-Key` con `UNIQUE` en `analyses`; ante un reintento, devolver el registro existente. |
+| Análisis asíncrono para modelos lentos | Estado `pending`, worker con `SELECT ... FOR UPDATE SKIP LOCKED`, `202` + `GET /api/analysis/{id}` para consultar. |
+| Paginación por cursor en `GET /api/logs` | Cursor `(timestamp, id)` en lugar de `OFFSET`, para no degradar con volumen. |
+| Ingesta en lote (`POST /api/logs` con un array) | Mismo schema por ítem, un `INSERT` multi-fila en una transacción, reporte de errores por índice. |
+| OpenAPI | `@fastify/swagger` a partir de los JSON Schemas que ya validan cada ruta. |
+| Retención / borrado de logs | Revisar antes la integridad de `analyses.log_ids` (array sin FK). |
+| Migraciones con varias réplicas arrancando a la vez | `pg_advisory_lock` alrededor de `runMigrations`. |
+| Seed en producción | Hoy el seed corre siempre al arrancar; con datos reales lo haría opcional (`SEED_DEMO=false`). |
 
-Tests y typecheck, también desde ese mismo clon limpio:
+## Problemas conocidos
 
-```bash
-npm ci
-npm run typecheck   # sin errores
-npm test            # 71/71 passing
-```
-
-Esto cubre explícitamente lo que pide el enunciado antes de entregar:
-`docker compose up` sin pasos adicionales, los tests corriendo con el
-comando documentado, y ningún estado previo del entorno de desarrollo
-"ensuciando" el resultado.
-
-### Auditoría posterior (5 hallazgos reales, corregidos y re-verificados)
-
-Después de la Etapa 4 se hizo una pasada de auditoría completa: relectura
-crítica de cada archivo, pruebas en vivo de casos límite contra el
-contenedor real (JSON malformado, body vacío, payload de 2 MB, inyección
-SQL) y revisión de la imagen Docker. Apareció esto, todo corregido y
-re-verificado con un segundo clon limpio completo:
-
-| # | Hallazgo | Evidencia | Fix |
-|---|---|---|---|
-| 1 | Un error propio de Fastify (JSON malformado, body vacío, `413` por payload grande) devolvía `500` en vez de su código real | `docker compose logs` mostró `FST_ERR_CTP_BODY_TOO_LARGE` (`statusCode: 413`) pero el cliente recibía `500` | El error handler ahora respeta `error.statusCode` cuando es un 4xx genuino de Fastify, no solo `AppError`/`.validation` |
-| 2 | El contenedor corría como `root` | `docker compose exec app whoami` → `root` | `USER node` (usuario no-root que ya trae la imagen oficial) |
-| 3 | Si el adaptador fallaba, el error real nunca se logueaba — solo quedaba el código genérico en la base | Lectura de `orchestrator.ts`: el `catch` no logueaba nada | Se loguea server-side (`request.log.warn`) sin exponerlo nunca al cliente |
-| 4 | Un segundo `SIGTERM`/`SIGINT` durante el shutdown podía cerrar el pool dos veces en paralelo | Lectura de `server.ts` | Flag de guarda para que el segundo signal sea un no-op |
-| 5 | `limit` (truncado de resultados y default) no tenía ningún test, pese a ser un comportamiento documentado | `grep` sobre los tests confirmó que no se verificaba | 2 tests nuevos que prueban truncado y que se mantienen las filas más recientes |
-
-Se intentó además inyección SQL vía query params (`service`) y en el body:
-el valor viajó parametrizado y la tabla quedó intacta, como se espera de
-usar `pg` con placeholders en todo el código (nunca interpolación de
-strings de usuario en SQL).
-
-## Uso de IA durante el desarrollo
-
-Se construyó con Claude Code (Anthropic) como asistente, en una sesión
-dirigida e iterativa, no generación de código en bloque sin revisión. Cada
-línea entregada fue leída y entendida antes de aceptarse; lo que sigue es un
-resumen honesto de qué se aceptó, qué se corrigió y qué se descartó — no una
-lista completa de cada prompt.
-
-**Lo que más aportó:**
-- Redactar el primer borrador de `ARCHITECTURE.md` (diagrama, modelo,
-  contrato) a partir de un brief detallado, para discutirlo y ajustarlo
-  antes de escribir código — ahorró el tiempo de armar la estructura desde
-  cero y dejó más horas para la implementación y los tests.
-- Escribir el *boilerplate* repetitivo (schemas de Fastify, repositorios SQL,
-  el error handler centralizado) rápido y de forma consistente entre
-  módulos.
-- Diseñar los tests de integración para los casos límite de la Etapa 3
-  (timeout con resolución tardía sin sobrescritura, violación real de
-  constraint para simular un fallo de persistencia) — son los que más
-  defienden la robustez pedida en el enunciado.
-
-**Lo que se corrigió o descartó:**
-- El primer intento de Etapa 0 (de una sesión anterior) había diseñado un
-  flujo **asincrónico** (cola, `202` + polling, RFC 9457). Se descartó por
-  completo a favor de un flujo síncrono más simple y verificable en el
-  tiempo disponible; queda en la rama `stage-1-walking-skeleton` como
-  referencia, sin mergear.
-- La primera versión de Etapa 1-2 se escribió sin Docker corriendo en el
-  entorno. Al verificarla de verdad contra Postgres real aparecieron 3 bugs
-  reales que el *typecheck* no detecta y que se corrigieron antes de seguir:
-  Fastify aceptaba y descartaba en silencio campos no declarados del body
-  (`removeAdditional`), `Date.parse` no rechazaba fechas de calendario
-  inexistentes como el 30 de febrero, y los archivos de test de integración
-  corrían en paralelo contra la misma base real, pisándose entre sí con
-  `TRUNCATE`.
-- Se usó `git merge --allow-unrelated-histories` en vez de `git reset --hard`
-  para reconciliar el historial del repo (el entorno bloqueó el `reset
-  --hard` por destructivo) — resultado: el historial real de ambos intentos
-  de diseño queda visible en vez de reescrito.
-
-- Una auditoría completa posterior a la Etapa 4 (relectura de cada archivo +
-  pruebas en vivo contra el contenedor: JSON malformado, payloads grandes,
-  intento de inyección SQL) encontró 5 problemas reales más —el más
-  importante, que cualquier error propio de Fastify que no fuera de
-  validación de schema devolvía `500` en vez de su código HTTP real (ver
-  tabla en [Verificación](#verificación))—, todos corregidos y
-  re-verificados con un segundo clon limpio completo. Detalle en el
-  historial de commits (`fix: surface Fastify's own request errors...` y
-  `fix: audit hardening...`).
-
-**Lección general:** el *typecheck* y la compilación nunca reemplazan correr
-contra la base de datos y el contenedor reales — ninguno de los 8 bugs
-reales encontrados en todo el proceso (3 en Etapa 1-2, 5 en la auditoría)
-rompía el *typecheck*; todos aparecieron solo al ejecutar.
-
-## Qué dejaste afuera (y cómo lo resolvería)
-
-| Qué | Por qué quedó afuera | Cómo lo resolvería |
-|---|---|---|
-| Idempotencia de `POST /api/logs/analyze` | El enunciado no la exige y el tiempo disponible priorizó la robustez del timeout/validación sobre esto | Aceptar un header `Idempotency-Key` del cliente, `UNIQUE` sobre esa clave en `analyses`, y devolver el registro existente ante un reintento |
-| Proveedor de LLM real | El enunciado permite explícitamente un mock; gastar tiempo/dinero en una API key no sumaba valor al desafío | `HttpLlmAdapter` implementando la misma interfaz `AnalysisAdapter` (documentado en ARCHITECTURE.md §4), seleccionable por variable de entorno |
-| Paginación por cursor en `GET /api/logs` | El enunciado pide "filtros", no paginación; `limit` acotado alcanza para el prototipo | Cursor por `(timestamp, id)` en vez de `OFFSET`, para no degradar con volumen |
-| CI (GitHub Actions) | Extra opcional del enunciado, condicionado a que lo obligatorio ya funcione | Un workflow que corra `npm run typecheck`, levante Postgres como servicio y corra `npm test` en cada push |
-| Retención/borrado de logs analizados | Fuera del alcance del prototipo | Revisar la integridad referencial de `analyses.log_ids` (hoy es un array sin FK) antes de permitir borrar logs ya analizados |
-| Lock para migraciones concurrentes | `docker compose up` corre un solo replica de `app`; con 2+ arrancando a la vez contra una base vacía, ambos podrían intentar aplicar la misma migración a la vez | `pg_advisory_lock` alrededor de `runMigrations`, detectado en la auditoría de código, no en ejecución |
-| UI | El enunciado pide una API, no una interfaz | No aplica para este desafío |
+- **Docker Desktop en Windows:** a veces `curl localhost:3000` desde el host queda
+  colgado aunque el contenedor esté sano (`docker compose ps` lo marca `healthy`).
+  Probar con `127.0.0.1` o reiniciar Docker Desktop.
