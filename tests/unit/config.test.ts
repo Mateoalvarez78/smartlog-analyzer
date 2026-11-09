@@ -40,6 +40,42 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...BASE_ENV, ANALYSIS_MAX_LOGS: "-5" })).toThrow(/ANALYSIS_MAX_LOGS/);
   });
 
+  it("does not include LLM settings for the mock adapter", () => {
+    expect(loadConfig(BASE_ENV)).not.toHaveProperty("llm");
+  });
+
+  it("rejects an unknown ANALYSIS_ADAPTER", () => {
+    expect(() => loadConfig({ ...BASE_ENV, ANALYSIS_ADAPTER: "gpt" })).toThrow(/ANALYSIS_ADAPTER/);
+  });
+
+  it("requires LLM_BASE_URL and LLM_MODEL for the openai-compatible adapter", () => {
+    const env = { ...BASE_ENV, ANALYSIS_ADAPTER: "openai-compatible" };
+    expect(() => loadConfig(env)).toThrow(/LLM_BASE_URL/);
+    expect(() => loadConfig({ ...env, LLM_BASE_URL: "http://localhost:11434/v1" })).toThrow(/LLM_MODEL/);
+    expect(() => loadConfig({ ...env, LLM_BASE_URL: "not a url", LLM_MODEL: "m" })).toThrow(/LLM_BASE_URL/);
+  });
+
+  it("loads the openai-compatible settings, treating a blank API key as absent", () => {
+    const config = loadConfig({
+      ...BASE_ENV,
+      ANALYSIS_ADAPTER: "openai-compatible",
+      LLM_BASE_URL: "http://localhost:11434/v1",
+      LLM_MODEL: "llama3.1",
+      LLM_API_KEY: "",
+    });
+    expect(config.llm).toEqual({ baseUrl: "http://localhost:11434/v1", model: "llama3.1", apiKey: undefined });
+  });
+
+  it("never echoes the API key in a configuration error", () => {
+    const secret = "sk-super-secret";
+    try {
+      loadConfig({ ...BASE_ENV, ANALYSIS_ADAPTER: "openai-compatible", LLM_API_KEY: secret });
+      expect.unreachable();
+    } catch (error) {
+      expect((error as Error).message).not.toContain(secret);
+    }
+  });
+
   it("honors explicit overrides", () => {
     const config = loadConfig({ ...BASE_ENV, PORT: "8080", LOG_LEVEL: "debug", NODE_ENV: "production" });
     expect(config.port).toBe(8080);

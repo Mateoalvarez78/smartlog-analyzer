@@ -2,12 +2,17 @@ import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
+import { LlmAnalysisAdapter } from "../../src/analysis/llm/llm-adapter.js";
+import { MockLlmClient } from "../../src/analysis/llm/mock-llm-client.js";
+import type { LlmClient } from "../../src/analysis/llm/types.js";
 import type { AnalysisAdapter } from "../../src/analysis/types.js";
 import type { AppConfig } from "../../src/config.js";
 import { seedDatabase } from "../../db/seed.js";
 import { createTestPool, testDatabaseUrl, truncateAll } from "./helpers/db.js";
 import {
+  FixedTextLlmClient,
   MalformedTestAdapter,
+  SlowLlmClient,
   NeverRespondingInTimeTestAdapter,
   OversizedAdapterNameTestAdapter,
   ThrowingTestAdapter,
@@ -160,6 +165,54 @@ describe("POST /api/logs/analyze + GET /api/analysis/:id", () => {
     const body = res.json();
     expect(body.error.code).toBe("INTERNAL_ERROR");
     expect(body).not.toHaveProperty("analysisId");
+  });
+
+  describe("through the LLM adapter (raw text from the model)", () => {
+    const llm = (client: LlmClient) => new LlmAnalysisAdapter(client);
+
+    it("analyzes the seed end-to-end with the default mock LLM and persists the categories", async () => {
+      const app = await appWith({}, llm(new MockLlmClient()));
+      const res = await app.inject({ method: "POST", url: "/api/logs/analyze", payload: FULL_SEED_RANGE });
+
+      expect(res.statusCode).toBe(201);
+      const body = res.json();
+      expect(body.adapter).toBe("llm:mock-v1");
+      expect(body.result.categories.map((c: { name: string }) => c.name)).toEqual(
+        expect.arrayContaining(["connection_errors", "delivery_failures", "upstream_timeouts", "validation_errors", "rate_limiting"]),
+      );
+      expect(body.result.suggestions.length).toBe(body.result.categories.length);
+    });
+
+    it("accepts a valid answer wrapped in a ```json fence", async () => {
+      const answer = "```json\n" + JSON.stringify({ summary: "fine", categories: [], suggestions: [] }) + "\n```";
+      const app = await appWith({}, llm(new FixedTextLlmClient(answer)));
+      const res = await app.inject({ method: "POST", url: "/api/logs/analyze", payload: FULL_SEED_RANGE });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().result.summary).toBe("fine");
+    });
+
+    it.each([
+      ["prose instead of JSON", "Sure! The logs show some connection problems."],
+      ["truncated JSON", '{"summary":"Found 3 connection err'],
+      ["JSON missing required fields", '{"summary":"ok"}'],
+      ["JSON with the wrong types", '{"summary":"ok","categories":"none","suggestions":[]}'],
+    ])("returns 502 INVALID_ADAPTER_OUTPUT and persists the failure for %s", async (_name, answer) => {
+      const app = await appWith({}, llm(new FixedTextLlmClient(answer)));
+      const res = await app.inject({ method: "POST", url: "/api/logs/analyze", payload: FULL_SEED_RANGE });
+
+      expect(res.statusCode).toBe(502);
+      expect(res.json().error.code).toBe("INVALID_ADAPTER_OUTPUT");
+
+      const getRes = await app.inject({ method: "GET", url: `/api/analysis/${res.json().analysisId}` });
+      expect(getRes.json()).toMatchObject({ status: "failed", errorCode: "INVALID_ADAPTER_OUTPUT", result: null });
+    });
+
+    it("returns 504 when the model takes longer than the timeout", async () => {
+      const app = await appWith({ analysisTimeoutMs: 50 }, llm(new SlowLlmClient(300)));
+      const res = await app.inject({ method: "POST", url: "/api/logs/analyze", payload: FULL_SEED_RANGE });
+      expect(res.statusCode).toBe(504);
+      expect(res.json().error.code).toBe("ADAPTER_TIMEOUT");
+    });
   });
 
   it("rejects an invalid analysis id with 400", async () => {

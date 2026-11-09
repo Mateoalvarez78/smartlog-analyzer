@@ -1,6 +1,6 @@
 import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import type { Pool } from "pg";
-import { MockAnalysisAdapter } from "./analysis/mock-adapter.js";
+import { createAnalysisAdapter } from "./analysis/create-adapter.js";
 import type { AnalysisAdapter } from "./analysis/types.js";
 import type { AppConfig } from "./config.js";
 import { AppError } from "./errors.js";
@@ -41,7 +41,7 @@ function toValidationDetail(error: AjvError): ValidationDetail {
 export function buildApp(
   config: AppConfig,
   pool: Pool,
-  adapter: AnalysisAdapter = new MockAnalysisAdapter(),
+  adapter: AnalysisAdapter = createAnalysisAdapter(config),
 ): FastifyInstance {
   const app = Fastify({
     logger: { level: config.logLevel },

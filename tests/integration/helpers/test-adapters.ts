@@ -1,4 +1,24 @@
+import type { LlmClient, LlmPrompt } from "../../../src/analysis/llm/types.js";
 import type { AnalysisAdapter, AnalysisInput, AnalysisOutput } from "../../../src/analysis/types.js";
+
+/** An LLM client that answers every prompt with a fixed raw text, like a real model might. */
+export class FixedTextLlmClient implements LlmClient {
+  readonly name = "test-fixed-text";
+  constructor(private readonly text: string) {}
+  async complete(_prompt: LlmPrompt): Promise<string> {
+    return this.text;
+  }
+}
+
+/** An LLM client that ignores the AbortSignal and answers late. */
+export class SlowLlmClient implements LlmClient {
+  readonly name = "test-slow-llm";
+  constructor(private readonly answerAfterMs: number) {}
+  async complete(_prompt: LlmPrompt): Promise<string> {
+    await delay(this.answerAfterMs);
+    return '{"summary":"too late","categories":[],"suggestions":[]}';
+  }
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
