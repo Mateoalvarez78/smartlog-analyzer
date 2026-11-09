@@ -176,6 +176,17 @@ describe("POST /api/logs/analyze + GET /api/analysis/:id", () => {
     expect(res.json().error.code).toBe("ANALYSIS_NOT_FOUND");
   });
 
+  it("rejects from >= to with 400 INVALID_RANGE, not 422 EMPTY_BATCH", async () => {
+    const app = await appWith();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/logs/analyze",
+      payload: { from: FULL_SEED_RANGE.to, to: FULL_SEED_RANGE.from },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("INVALID_RANGE");
+  });
+
   it("rejects a request missing the required from/to fields", async () => {
     const app = await appWith();
     const res = await app.inject({ method: "POST", url: "/api/logs/analyze", payload: { service: "payments-api" } });

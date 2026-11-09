@@ -7,7 +7,7 @@ import type { AnalysisAdapter } from "../analysis/types.js";
 import type { AppConfig } from "../config.js";
 import { badRequest, notFound, unprocessable } from "../errors.js";
 import type { LogLevel } from "../logs/types.js";
-import { assertValidTimestamp } from "../time.js";
+import { assertValidRange, assertValidTimestamp } from "../time.js";
 
 interface PostAnalyzeBody {
   from: string;
@@ -24,6 +24,7 @@ export function registerAnalysisRoutes(app: FastifyInstance, pool: Pool, config:
       const { from, to, service, level } = request.body;
       assertValidTimestamp(from);
       assertValidTimestamp(to);
+      assertValidRange(from, to);
 
       const outcome = await runAnalysis(
         pool,

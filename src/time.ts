@@ -54,3 +54,15 @@ export function assertValidTimestamp(value: string): void {
     throw badRequest("INVALID_TIMESTAMP", `"${value}" is not a real calendar date/time.`);
   }
 }
+
+/**
+ * The [from, to) interval is empty when from >= to. Answering that with
+ * 200 [] (listing) or 422 EMPTY_BATCH (analysis) hides a client mistake
+ * behind a "no data" result, so it's rejected explicitly. Both values must
+ * already have passed assertValidTimestamp.
+ */
+export function assertValidRange(from: string, to: string): void {
+  if (Date.parse(from) >= Date.parse(to)) {
+    throw badRequest("INVALID_RANGE", `"from" (${from}) must be earlier than "to" (${to}).`);
+  }
+}

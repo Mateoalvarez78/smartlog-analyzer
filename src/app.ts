@@ -8,6 +8,36 @@ import { registerAnalysisRoutes } from "./routes/analysis.js";
 import { registerHealthRoute } from "./routes/health.js";
 import { registerLogsRoutes } from "./routes/logs.js";
 
+interface ValidationDetail {
+  field: string;
+  message: string;
+}
+
+type AjvError = NonNullable<FastifyError["validation"]>[number];
+
+/**
+ * Turns an AJV error into something a client can act on ("which field, what's
+ * wrong") without echoing schema internals such as the raw regex of a
+ * `pattern` rule.
+ */
+function toValidationDetail(error: AjvError): ValidationDetail {
+  const params = error.params as Record<string, unknown>;
+  const pathField = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
+
+  switch (error.keyword) {
+    case "required":
+      return { field: String(params.missingProperty), message: "is required" };
+    case "additionalProperties":
+      return { field: String(params.additionalProperty), message: "is not an allowed field" };
+    case "pattern":
+      return { field: pathField, message: "has an invalid format" };
+    case "enum":
+      return { field: pathField, message: `must be one of: ${(params.allowedValues as string[]).join(", ")}` };
+    default:
+      return { field: pathField || "(root)", message: error.message ?? "is invalid" };
+  }
+}
+
 export function buildApp(
   config: AppConfig,
   pool: Pool,
@@ -30,7 +60,11 @@ export function buildApp(
 
     if (error.validation) {
       return reply.code(400).send({
-        error: { code: "VALIDATION_ERROR", message: "The request does not match the expected schema." },
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "The request does not match the expected schema.",
+          details: error.validation.map(toValidationDetail),
+        },
       });
     }
 

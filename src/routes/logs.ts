@@ -4,7 +4,7 @@ import type { AppConfig } from "../config.js";
 import { insertLog, listLogs } from "../logs/repository.js";
 import { getLogsQuerySchema, postLogBodySchema } from "../logs/schema.js";
 import type { ListLogsFilters, LogLevel, NewLog } from "../logs/types.js";
-import { assertValidTimestamp } from "../time.js";
+import { assertValidRange, assertValidTimestamp } from "../time.js";
 
 interface PostLogBody {
   service: string;
@@ -42,6 +42,7 @@ export function registerLogsRoutes(app: FastifyInstance, pool: Pool, config: App
       const { service, level, from, to, limit } = request.query;
       if (from !== undefined) assertValidTimestamp(from);
       if (to !== undefined) assertValidTimestamp(to);
+      if (from !== undefined && to !== undefined) assertValidRange(from, to);
 
       const filters: ListLogsFilters = {
         ...(service !== undefined ? { service } : {}),

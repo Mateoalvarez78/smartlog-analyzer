@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertValidTimestamp } from "../../src/time.js";
+import { assertValidRange, assertValidTimestamp } from "../../src/time.js";
 
 describe("assertValidTimestamp", () => {
   it("accepts a valid UTC timestamp", () => {
@@ -34,5 +34,20 @@ describe("assertValidTimestamp", () => {
   it("correctly rejects February 29th on a non-leap year but accepts it on a leap year", () => {
     expect(() => assertValidTimestamp("2026-02-29T00:00:00Z")).toThrow(/not a real calendar date/);
     expect(() => assertValidTimestamp("2028-02-29T00:00:00Z")).not.toThrow();
+  });
+});
+
+describe("assertValidRange", () => {
+  it("accepts from strictly before to", () => {
+    expect(() => assertValidRange("2026-11-01T00:00:00Z", "2026-11-01T00:00:01Z")).not.toThrow();
+  });
+
+  it("compares instants, not strings: offsets are taken into account", () => {
+    // 00:00-03:00 is 03:00Z, which is after 01:00Z even though the string sorts first.
+    expect(() => assertValidRange("2026-11-01T00:00:00-03:00", "2026-11-01T01:00:00Z")).toThrow(/must be earlier/);
+  });
+
+  it("rejects an empty interval (from == to)", () => {
+    expect(() => assertValidRange("2026-11-01T00:00:00Z", "2026-11-01T00:00:00Z")).toThrow(/must be earlier/);
   });
 });

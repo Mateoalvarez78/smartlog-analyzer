@@ -81,12 +81,42 @@ describe("POST /api/logs", () => {
     ["timestamp without offset", { timestamp: "2026-11-01T08:00:00" }],
     ["malformed timestamp", { timestamp: "not-a-date" }],
     ["unknown extra field", { extra: "nope" }],
+    ["whitespace-only service", { service: "   " }],
+    ["whitespace-only message", { message: " \n\t " }],
+    ["NUL byte in message", { message: "before\u0000after" }],
+    ["NUL byte in service", { service: "pay\u0000ments" }],
   ])("rejects %s with 400 and a safe error body", async (_name, overrides) => {
     const response = await postLog(app, overrides);
     expect(response.statusCode).toBe(400);
     const body = response.json();
     expect(body).toHaveProperty("error.code");
     expect(body).toHaveProperty("error.message");
+  });
+
+  it("accepts a multi-line message (e.g. a stack trace)", async () => {
+    const response = await postLog(app, { message: "Error: boom\n    at handler (index.js:10:5)" });
+    expect(response.statusCode).toBe(201);
+  });
+
+  it("tells the client which field failed validation", async () => {
+    const response = await postLog(app, { level: "CRITICAL", service: undefined });
+    expect(response.statusCode).toBe(400);
+    const { error } = response.json();
+    expect(error.code).toBe("VALIDATION_ERROR");
+    expect(error.details).toEqual(expect.arrayContaining([expect.objectContaining({ field: expect.any(String) })]));
+    expect(error.details.length).toBeGreaterThan(0);
+  });
+
+  it("names the offending field and allowed values for an invalid enum", async () => {
+    const response = await postLog(app, { level: "CRITICAL" });
+    expect(response.json().error.details).toEqual([
+      { field: "level", message: "must be one of: DEBUG, INFO, WARN, ERROR" },
+    ]);
+  });
+
+  it("names an unexpected extra field", async () => {
+    const response = await postLog(app, { sevice: "typo" });
+    expect(response.json().error.details).toEqual([{ field: "sevice", message: "is not an allowed field" }]);
   });
 
   it("rejects a timestamp that matches the pattern but is not a real calendar date", async () => {
@@ -199,5 +229,21 @@ describe("GET /api/logs", () => {
   it("rejects malformed filter timestamps", async () => {
     const response = await app.inject({ method: "GET", url: "/api/logs?from=not-a-date" });
     expect(response.statusCode).toBe(400);
+  });
+
+  it.each([
+    ["from after to", "from=2026-11-02T00:00:00Z&to=2026-11-01T00:00:00Z"],
+    ["from equal to to (empty half-open interval)", "from=2026-11-01T00:00:00Z&to=2026-11-01T00:00:00Z"],
+    ["same instant written with different offsets", "from=2026-11-01T00:00:00Z&to=2026-10-31T21:00:00-03:00"],
+  ])("rejects %s with 400 INVALID_RANGE instead of an empty list", async (_name, query) => {
+    const response = await app.inject({ method: "GET", url: `/api/logs?${query}` });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("INVALID_RANGE");
+  });
+
+  it("rejects a NUL byte in the service filter with 400, not 500", async () => {
+    const response = await app.inject({ method: "GET", url: "/api/logs?service=pay%00ments" });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("VALIDATION_ERROR");
   });
 });

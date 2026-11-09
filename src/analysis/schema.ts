@@ -1,4 +1,4 @@
-import { LOG_LEVELS, TIMESTAMP_PATTERN } from "../logs/schema.js";
+import { LOG_LEVELS, SERVICE_SCHEMA, TIMESTAMP_PATTERN } from "../logs/schema.js";
 
 export const postAnalyzeBodySchema = {
   type: "object",
@@ -7,7 +7,7 @@ export const postAnalyzeBodySchema = {
   properties: {
     from: { type: "string", pattern: TIMESTAMP_PATTERN },
     to: { type: "string", pattern: TIMESTAMP_PATTERN },
-    service: { type: "string", minLength: 1, maxLength: 100 },
+    service: SERVICE_SCHEMA,
     level: { type: "string", enum: LOG_LEVELS },
   },
 } as const;
