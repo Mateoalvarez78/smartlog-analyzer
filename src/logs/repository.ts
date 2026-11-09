@@ -85,8 +85,8 @@ export async function listLogs(pool: Pool, filters: ListLogsFilters): Promise<Lo
 /**
  * Aggregation required by the challenge ("al menos una consulta de
  * agregación"): count of logs per service and level within [from, to).
- * Exercised by tests/integration against the seed data; not exposed as its
- * own route since the brief only lists the five endpoints in §3.
+ * Exposed as GET /api/logs/stats. Served by the (service, level, timestamp)
+ * index.
  */
 export async function aggregateByServiceAndLevel(
   pool: Pool,

@@ -33,6 +33,18 @@ export const postLogBodySchema = {
   },
 } as const;
 
+export const getLogStatsQuerySchema = {
+  type: "object",
+  additionalProperties: false,
+  // Required on purpose: an unbounded GROUP BY over the whole table is the
+  // kind of query that's cheap in a demo and expensive in production.
+  required: ["from", "to"],
+  properties: {
+    from: { type: "string", pattern: TIMESTAMP_PATTERN },
+    to: { type: "string", pattern: TIMESTAMP_PATTERN },
+  },
+} as const;
+
 export function getLogsQuerySchema(logsMaxLimit: number) {
   return {
     type: "object",
