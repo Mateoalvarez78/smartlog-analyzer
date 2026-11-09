@@ -17,12 +17,23 @@ export function createPool(config: AppConfig): Pool {
 export async function checkDatabase(pool: Pool, timeoutMs: number): Promise<boolean> {
   const probe = (async () => {
     const client = await pool.connect();
+    let failed = false;
     try {
-      await client.query(`SET statement_timeout = ${timeoutMs}`);
+      // SET LOCAL scopes the timeout to this transaction. A plain SET would
+      // stick to the pooled connection and silently cap every later query
+      // that reuses it (listing, analysis) at the health-check budget.
+      await client.query("BEGIN");
+      await client.query(`SET LOCAL statement_timeout = ${Math.trunc(timeoutMs)}`);
       await client.query("SELECT 1");
+      await client.query("COMMIT");
       return true;
+    } catch (error) {
+      failed = true;
+      throw error;
     } finally {
-      client.release();
+      // A connection that failed mid-transaction is discarded, not returned
+      // to the pool in an unknown state.
+      client.release(failed);
     }
   })().catch(() => false);
 

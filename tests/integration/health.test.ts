@@ -40,6 +40,26 @@ describe("GET /api/health", () => {
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual({ status: "ok", checks: { database: "ok" } });
     });
+
+    it("does not leak its statement_timeout into the pooled connection", async () => {
+      // A single-connection pool guarantees the next query reuses exactly the
+      // connection the health check just used.
+      const singlePool = new Pool({ connectionString: testDatabaseUrl(), max: 1 });
+      const singleApp = buildApp({ ...BASE_CONFIG, databaseUrl: testDatabaseUrl() }, singlePool);
+      try {
+        await singleApp.ready();
+        const before = await singlePool.query<{ statement_timeout: string }>("SHOW statement_timeout");
+
+        const response = await singleApp.inject({ method: "GET", url: "/api/health" });
+        expect(response.statusCode).toBe(200);
+
+        const after = await singlePool.query<{ statement_timeout: string }>("SHOW statement_timeout");
+        expect(after.rows[0]?.statement_timeout).toBe(before.rows[0]?.statement_timeout);
+      } finally {
+        await singleApp.close();
+        await singlePool.end();
+      }
+    });
   });
 
   describe("when the database is unreachable", () => {
