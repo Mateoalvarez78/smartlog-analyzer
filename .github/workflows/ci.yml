@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Typecheck and tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: smartlog
+          POSTGRES_PASSWORD: smartlog-ci
+          POSTGRES_DB: smartlog
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U smartlog -d smartlog"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      TEST_DATABASE_URL: postgresql://smartlog:smartlog-ci@localhost:5432/smartlog
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  compose:
+    # Checks the delivery requirement literally: `docker compose up` brings up
+    # app + database with no extra steps, and the API answers.
+    name: docker compose up smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up --build --detach --wait
+      - run: curl --fail --silent --show-error http://localhost:3000/api/health
+      - run: |
+          curl --fail --silent --show-error -X POST http://localhost:3000/api/logs/analyze \
+            -H "Content-Type: application/json" \
+            -d '{"from":"2026-11-01T00:00:00Z","to":"2026-11-02T00:00:00Z"}'
+      - if: failure()
+        run: docker compose logs
+      - if: always()
+        run: docker compose down -v
