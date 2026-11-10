@@ -153,39 +153,67 @@ no levanta e indica cuál (nunca su valor).
 
 ## Cómo usé IA durante el desarrollo
 
-Usé Claude Code (Anthropic) como asistente en sesiones dirigidas: yo definía el
-enfoque y revisaba cada cambio antes de aceptarlo.
+Usé Claude Code (Anthropic) como asistente, en varias sesiones. Arrancamos con un
+plan por etapas (arquitectura → base de datos → ingesta → análisis →
+verificación), pero no fue un plan cerrado: lo fui ajustando a medida que algo
+no se sostenía al ejecutarlo, y el proyecto se construyó de a poco, etapa por
+etapa, revisando cada cambio antes de aceptarlo.
 
-**Lo que más aportó**
-- Un primer borrador de `ARCHITECTURE.md` a partir de mi brief, que discutí y
-  ajusté antes de escribir código.
-- El código repetitivo (schemas de Fastify, repositorios SQL, error handler) de
-  forma consistente entre módulos.
-- Diseñar casos borde de tests: timeout con respuesta tardía que no debe pisar el
-  resultado, fallo real de persistencia vía un `CHECK` de Postgres, respuestas
-  malformadas del LLM.
-- Una revisión final del código contra la letra, que encontró problemas que
-  después corregí con su test: el health check dejaba un `statement_timeout` de
-  1 s pegado a conexiones del pool, un byte NUL en un log daba `500`, un rango
-  invertido devolvía una lista vacía, y el mock devolvía un objeto ya armado, así
-  que el parseo de una respuesta real de un LLM no tenía código ni tests.
+Algunos de los cambios de rumbo más importantes — la alternativa que se dejó
+de lado y por qué:
 
-**Lo que corregí o descarté**
-- El primer diseño propuesto era asincrónico (cola, `202` + polling, RFC 9457).
-  Lo descarté por un flujo síncrono más simple de verificar en el tiempo
-  disponible (queda en la rama `stage-1-walking-skeleton`).
-- El código inicial se escribió sin correr contra Postgres. Al ejecutarlo
-  aparecieron bugs que el typecheck no detectaba: Fastify descartaba en silencio
-  campos no declarados, `Date.parse` aceptaba el 30 de febrero, y los tests de
-  integración se pisaban entre sí al correr en paralelo.
-- Una pasada contra el contenedor real encontró que los errores propios de
-  Fastify (JSON malformado, body demasiado grande) salían como `500` en vez de su
-  código real, y que el contenedor corría como `root`.
-- Para el parser de respuestas del LLM descarté la opción permisiva de "buscar el
-  primer `{...}` en el texto": esconde fallas del modelo.
+- **Análisis síncrono vs. cola asíncrona.** El primer borrador de arquitectura
+  (de una sesión anterior) proponía una cola con estado `pending`, `202` +
+  polling y errores en formato RFC 9457. Lo reemplazamos por un flujo síncrono
+  con timeout acotado: para 100 logs y un mock que responde al instante, la
+  cola agregaba locking y estado sin necesidad real, y no alcanzaba el tiempo
+  para verificarla bien. Si un modelo real tardara 20-30 segundos, ese sería
+  el primer cambio a reconsiderar. (Ese primer diseño queda en la rama
+  `stage-1-walking-skeleton`, sin mergear, como referencia.)
 
-Lo que más aprendí: compilar y pasar el typecheck no reemplaza correr contra la
-base y el contenedor reales. Casi todos los bugs aparecieron solo al ejecutar.
+- **`from >= to`: ¿lista vacía o error?** La primera versión devolvía
+  `200 []` (razonando que "rango sin resultados" y "rango inválido" eran lo
+  mismo). Al revisarlo de nuevo nos dimos cuenta de que eso esconde un error
+  del cliente detrás de un "no hay datos" — se cambió a `400 INVALID_RANGE`,
+  distinguiendo explícitamente "rango válido sin datos" de "rango mal
+  armado".
+
+- **El mock del LLM: objeto armado vs. texto real.** La primera versión del
+  adaptador mock devolvía directamente un objeto `AnalysisOutput` ya tipado.
+  Funcionaba, pero significaba que los tests de "respuesta inesperada del
+  LLM" solo podían simular un objeto bien formado con un dato incorrecto —
+  nunca el caso real de un modelo que devuelve prosa, un bloque de markdown
+  con fence `json`, o JSON cortado. Se rediseñó para que el mock pase por el mismo camino de
+  texto que un proveedor real (arma texto, lo parsea, lo valida), así los
+  tests de "formato inesperado" prueban fallas de verdad, no una simulación
+  cómoda.
+
+- **Migraciones: librería vs. script propio.** Se consideró `node-pg-migrate`,
+  pero el alcance (aplicar un puñado de `.sql` en orden, sin necesitar
+  rollback) no justificaba la dependencia — un runner de ~40 líneas hace lo
+  mismo y es auditable de un vistazo.
+
+- **Categorías del LLM: texto libre vs. lista cerrada.** Se evaluó forzar un
+  enum fijo de categorías para que un modelo real no pueda "inventar"
+  nombres nuevos cada vez. Se decidió no hacerlo ahora: una lista cerrada
+  necesita revalidar la taxonomía cada vez que cambia y agrega lógica de
+  orquestación que no alcanzaba a probarse bien en el tiempo disponible.
+  Queda anotado como el primer cambio natural si se muestra un modelo real.
+
+- **Contenedor como root vs. usuario sin privilegios.** La primera versión
+  del `Dockerfile` no fijaba usuario (corría como `root` por default de la
+  imagen). Al auditar el proyecto completo se cambió a `USER node`: no había
+  ninguna razón real para correr como root, y era gratis arreglarlo.
+
+Un hilo que se repite en casi todos estos casos: **el typecheck nunca mostró
+ninguno de estos problemas.** Compilaba limpio en todas las versiones
+"viejas". Lo que los sacó a la luz fue correr el código de verdad contra
+Postgres real y contra el contenedor — varias veces un bug apareció recién
+ahí: el `statement_timeout` que se pegaba a una conexión del pool, un byte
+NUL que llegaba a Postgres y volvía como `500`, un `413` de Fastify que el
+error handler propio convertía en `500`. Construir de a poco y volver a
+probar cada etapa contra el entorno real, en vez de confiar en que "si
+compila, funciona", fue la parte más útil de trabajar así.
 
 ## Qué quedó afuera y cómo lo resolvería
 
