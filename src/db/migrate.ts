@@ -1,14 +1,11 @@
-import { readdir, readFile } from "node:fs/promises";
-import path from "node:path";
 import { Pool } from "pg";
 import { loadConfig } from "../config.js";
-
-const MIGRATIONS_DIR = path.join(process.cwd(), "db", "migrations");
+import { migrations } from "../../db/migrations/index.js";
 
 /**
- * Minimal forward-only migration runner: applies db/migrations/*.sql files in
- * filename order, each inside its own transaction, and records applied
- * filenames in schema_migrations so re-running on an already-migrated
+ * Minimal forward-only migration runner: applies the migrations listed in
+ * db/migrations/index.ts in order, each inside its own transaction, and records applied
+ * migration names in schema_migrations so re-running on an already-migrated
  * database is a no-op. No external migration library: the project only
  * needs ordered SQL application, not rollback tooling.
  */
@@ -20,15 +17,13 @@ export async function runMigrations(pool: Pool): Promise<string[]> {
     )
   `);
 
-  const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith(".sql")).sort();
   const { rows } = await pool.query<{ filename: string }>("SELECT filename FROM schema_migrations");
   const applied = new Set(rows.map((r) => r.filename));
 
   const newlyApplied: string[] = [];
-  for (const file of files) {
+  for (const { name: file, sql } of migrations) {
     if (applied.has(file)) continue;
 
-    const sql = await readFile(path.join(MIGRATIONS_DIR, file), "utf8");
     const client = await pool.connect();
     try {
       await client.query("BEGIN");

@@ -7,6 +7,10 @@ apuntar a un modelo real con variables de entorno.
 
 Decisiones técnicas, diagrama y contrato HTTP: [ARCHITECTURE.md](ARCHITECTURE.md).
 
+Repositorio con el historial completo de commits:
+https://github.com/Mateoalvarez78/smartlog-analyzer (el ZIP de entrega no incluye
+`.git` porque la plataforma no lo admite).
+
 ## Requisitos
 
 - Docker con Docker Compose v2.
@@ -189,7 +193,7 @@ de lado y por qué:
   cómoda.
 
 - **Migraciones: librería vs. script propio.** Se consideró `node-pg-migrate`,
-  pero el alcance (aplicar un puñado de `.sql` en orden, sin necesitar
+  pero el alcance (aplicar un puñado de scripts SQL en orden, sin necesitar
   rollback) no justificaba la dependencia — un runner de ~40 líneas hace lo
   mismo y es auditable de un vistazo.
 

@@ -1,3 +1,6 @@
+// Migration "0001_create_logs". Plain SQL kept as a string so the runner has no
+// files to read at runtime and the build ships it inside dist/.
+export default `
 -- Up
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -16,3 +19,4 @@ CREATE INDEX logs_timestamp_id_idx ON logs ("timestamp" DESC, id DESC);
 -- Serves GET /api/logs and POST /api/logs/analyze filtered by service and/or
 -- level over a [from, to) range, and the service/level aggregation query.
 CREATE INDEX logs_service_level_timestamp_idx ON logs (service, level, "timestamp" DESC);
+`;

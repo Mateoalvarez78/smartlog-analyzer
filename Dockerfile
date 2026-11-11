@@ -12,6 +12,7 @@ RUN npm ci
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 COPY db/seed.ts ./db/seed.ts
+COPY db/migrations ./db/migrations
 RUN npm run build
 
 FROM node:24-alpine AS runtime
@@ -23,7 +24,6 @@ ENV NODE_ENV=production
 COPY --chown=node:node package.json ./
 COPY --chown=node:node --from=deps-prod /app/node_modules ./node_modules
 COPY --chown=node:node --from=build /app/dist ./dist
-COPY --chown=node:node db/migrations ./db/migrations
 COPY --chown=node:node docker/entrypoint.sh ./docker/entrypoint.sh
 RUN chmod +x ./docker/entrypoint.sh
 USER node

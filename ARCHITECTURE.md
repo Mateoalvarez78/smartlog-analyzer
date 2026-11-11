@@ -190,6 +190,7 @@ Clientes disponibles, elegidos con `ANALYSIS_ADAPTER`:
 | Solo `limit`, sin paginación por cursor | Cursor/keyset pagination | La letra pide "listar con filtros". `limit` acotado + orden estable alcanza para el prototipo. |
 | Errores propios `{error:{code,message,details?}}` | RFC 9457 (`application/problem+json`) | Más chico de implementar y testear. RFC 9457 es la mejora natural si la API crece. |
 | Runner de migraciones propio (~40 líneas) | `node-pg-migrate` | Solo hace falta aplicar SQL versionado en orden y no duplicar. Rollbacks y CLI son superficie que el alcance no necesita. |
+| Migraciones como módulos `.ts` que exportan el SQL (`db/migrations/*.ts`) | Archivos `.sql` leídos del disco | La plataforma de entrega (PIA) rechaza ZIPs con archivos `.sql`. El SQL es el mismo, solo cambia el contenedor: además se compila junto con la app, así que la imagen no depende de copiar una carpeta aparte. |
 | CI con GitHub Actions (tests + `docker compose up`) | Sin CI | Corre typecheck y tests contra Postgres, y comprueba de forma automática que `docker compose up` levanta todo sin pasos extra. |
 
 ## 6. Fallos y reintentos
@@ -216,7 +217,7 @@ Clientes disponibles, elegidos con `ANALYSIS_ADAPTER`:
 | Requisito | Dónde | Cómo se verifica |
 |---|---|---|
 | Diagrama + decisiones | §1 y §5 | — |
-| Modelo de datos, migraciones, seed | `db/migrations/*.sql`, `db/seed.ts` | `tests/integration/startup.test.ts` (migrar y re-seed sin duplicados) |
+| Modelo de datos, migraciones, seed | `db/migrations/*.ts`, `db/seed.ts` | `tests/integration/startup.test.ts` (migrar y re-seed sin duplicados) |
 | Consulta de agregación | `aggregateByServiceAndLevel` + `GET /api/logs/stats` | `tests/integration/logs-aggregation.test.ts` |
 | Endpoints, validación, errores | `src/routes/*`, `src/app.ts` | `tests/integration/logs.test.ts`, `analysis.test.ts`, `error-handling.test.ts`, `health.test.ts` |
 | LLM: resumen, categorías, sugerencias | `src/analysis/llm/*`, `heuristics.ts` | `tests/unit/llm-*.test.ts`, `heuristics.test.ts` |

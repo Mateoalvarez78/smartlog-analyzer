@@ -5,6 +5,6 @@
     "rootDir": ".",
     "noEmit": false
   },
-  "include": ["src", "db/seed.ts"],
+  "include": ["src", "db/seed.ts", "db/migrations"],
   "exclude": ["tests"]
 }

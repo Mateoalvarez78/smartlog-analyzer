@@ -1,3 +1,6 @@
+// Migration "0002_create_analyses". Plain SQL kept as a string so the runner has no
+// files to read at runtime and the build ships it inside dist/.
+export default `
 -- Up
 CREATE TABLE analyses (
   id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -19,3 +22,4 @@ CREATE TABLE analyses (
 
 -- Serves a future "recent analyses" listing; not exposed by any endpoint yet.
 CREATE INDEX analyses_created_at_idx ON analyses (created_at DESC);
+`;
