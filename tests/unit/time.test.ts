@@ -31,6 +31,15 @@ describe("assertValidTimestamp", () => {
     expect(() => assertValidTimestamp("not-a-date")).toThrow(/explicit offset/);
   });
 
+  it("rejects UTC offsets outside -14:00..+14:00 (PostgreSQL would reject them with a 500)", () => {
+    expect(() => assertValidTimestamp("2026-11-01T00:00:00+16:00")).toThrow(/out-of-range UTC offset/);
+    expect(() => assertValidTimestamp("2026-11-01T00:00:00-14:30")).toThrow(/out-of-range UTC offset/);
+    expect(() => assertValidTimestamp("2026-11-01T00:00:00+05:60")).toThrow(/out-of-range UTC offset/);
+    expect(() => assertValidTimestamp("2026-11-01T00:00:00+14:00")).not.toThrow();
+    expect(() => assertValidTimestamp("2026-11-01T00:00:00-12:00")).not.toThrow();
+    expect(() => assertValidTimestamp("2026-11-01T00:00:00+05:45")).not.toThrow();
+  });
+
   it("correctly rejects February 29th on a non-leap year but accepts it on a leap year", () => {
     expect(() => assertValidTimestamp("2026-02-29T00:00:00Z")).toThrow(/not a real calendar date/);
     expect(() => assertValidTimestamp("2028-02-29T00:00:00Z")).not.toThrow();

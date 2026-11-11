@@ -1,7 +1,12 @@
 import { badRequest } from "./errors.js";
 
 const TIMESTAMP_COMPONENTS =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-](\d{2}):(\d{2}))$/;
+
+// Real-world UTC offsets range from -12:00 to +14:00. Anything past that
+// matches the pattern but PostgreSQL rejects it ("time zone displacement out
+// of range"), which used to surface as a 500 instead of a 400.
+const MAX_OFFSET_HOURS = 14;
 
 /**
  * The route-level JSON schema (src/logs/schema.ts TIMESTAMP_PATTERN) only
@@ -16,7 +21,8 @@ const TIMESTAMP_COMPONENTS =
  * `Date.UTC` rolls over out-of-range fields the same way `new Date(...)`
  * does. The offset is deliberately excluded from this check — rolling a
  * valid local time into a different UTC calendar day (e.g. 23:30-03:00) is
- * normal and must not be flagged as invalid.
+ * normal and must not be flagged as invalid. The offset itself is only
+ * range-checked (see MAX_OFFSET_HOURS).
  */
 export function assertValidTimestamp(value: string): void {
   const match = TIMESTAMP_COMPONENTS.exec(value);
@@ -24,15 +30,15 @@ export function assertValidTimestamp(value: string): void {
     throw badRequest("INVALID_TIMESTAMP", `"${value}" is not a valid ISO 8601 timestamp with an explicit offset.`);
   }
 
-  const [, yearStr, monthStr, dayStr, hourStr, minuteStr, secondStr] = match as unknown as [
-    string,
-    string,
-    string,
-    string,
-    string,
-    string,
-    string,
-  ];
+  const [, yearStr, monthStr, dayStr, hourStr, minuteStr, secondStr, offsetHourStr, offsetMinuteStr] =
+    match as unknown as [string, string, string, string, string, string, string, string?, string?];
+
+  if (offsetHourStr !== undefined && offsetMinuteStr !== undefined) {
+    const offsetMinutes = Number(offsetHourStr) * 60 + Number(offsetMinuteStr);
+    if (Number(offsetMinuteStr) > 59 || offsetMinutes > MAX_OFFSET_HOURS * 60) {
+      throw badRequest("INVALID_TIMESTAMP", `"${value}" has an out-of-range UTC offset (allowed: -14:00 to +14:00).`);
+    }
+  }
   const year = Number(yearStr);
   const month = Number(monthStr);
   const day = Number(dayStr);

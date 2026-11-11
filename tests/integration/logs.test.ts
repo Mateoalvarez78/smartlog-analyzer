@@ -124,6 +124,12 @@ describe("POST /api/logs", () => {
     expect(response.statusCode).toBe(400);
     expect(response.json().error.code).toBe("INVALID_TIMESTAMP");
   });
+
+  it("rejects an out-of-range UTC offset with a 400 instead of letting PostgreSQL fail with a 500", async () => {
+    const response = await postLog(app, { timestamp: "2026-11-01T00:00:00+16:00" });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("INVALID_TIMESTAMP");
+  });
 });
 
 describe("GET /api/logs", () => {
